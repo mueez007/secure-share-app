@@ -1,0 +1,2 @@
+Showing sdk gphone64 arm64 logs:
+
