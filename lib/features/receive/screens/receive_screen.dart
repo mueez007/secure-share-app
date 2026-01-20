@@ -46,7 +46,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
   Timer? _autoCloseTimer;
   StreamSubscription? _connectivitySubscription;
   StreamSubscription<AppLifecycleState>? _lifecycleSubscription;
-  WebViewController? _webViewController;
+  late WebViewController _webViewController;
   DateTime? _lastInteractionTime;
   String _contentId = '';
 
@@ -54,9 +54,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
   void initState() {
     super.initState();
     
-    // Enable hybrid composition for Android WebView
+    // Initialize WebView for Android (webview_flutter 4.7.0)
     if (Platform.isAndroid) {
-      WebView.platform = AndroidWebView();
+      // For webview_flutter 4.x, use this initialization
+      // No platform assignment needed for 4.7.0
     }
     
     WidgetsBinding.instance.addObserver(this);
@@ -707,34 +708,12 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
   Widget _buildSecureWebView(bool isDark) {
     return Stack(
       children: [
-        // WebView - FIXED CONFIGURATION
-        WebView(
-          initialUrl: 'about:blank',
-          javascriptMode: JavascriptMode.unrestricted,
-          onWebViewCreated: (WebViewController controller) {
-            _webViewController = controller;
-            _loadContentIntoWebView();
-          },
-          navigationDelegate: (NavigationRequest request) { 
-            // Block all external navigation
-            _reportSuspiciousActivity('navigation_attempt', request.url);
-            return NavigationDecision.prevent;
-          },
-          onPageStarted: (String url) {
-            _resetInactivityTimer();
-          },
-          javascriptChannels: <JavascriptChannel>{
-            JavascriptChannel(
-              name: 'SecurityChannel',
-              onMessageReceived: (JavascriptMessage message) {
-                _handleJavascriptMessage(message.message);
-              },
-            ),
-          },
-          gestureNavigationEnabled: false,
+        // WebView - webview_flutter 4.7.0 compatible
+        WebViewWidget(
+          controller: _webViewController,
         ),
 
-        // No Internet Overlay - FIXED CONTAINER
+        // No Internet Overlay
         if (!_hasInternet)
           Container(
             color: Colors.black.withOpacity(0.95),
@@ -824,9 +803,35 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
     );
   }
 
-  void _loadContentIntoWebView() {
-    if (_webViewController == null) return;
+  void _initializeWebViewController() {
+    _webViewController = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(Colors.black)
+      ..setNavigationDelegate(NavigationDelegate(
+        onNavigationRequest: (request) {
+          // Block all external navigation
+          _reportSuspiciousActivity('navigation_attempt', request.url);
+          return NavigationDecision.prevent;
+        },
+        onPageStarted: (url) {
+          _resetInactivityTimer();
+        },
+        onPageFinished: (url) {
+          print('Page finished: $url');
+        },
+      ))
+      ..addJavaScriptChannel(
+        'SecurityChannel',
+        onMessageReceived: (JavaScriptMessage message) {
+          _handleJavascriptMessage(message.message);
+        },
+      );
 
+    // Load initial content
+    _loadContentIntoWebView();
+  }
+
+  void _loadContentIntoWebView() {
     String htmlContent = '''
       <!DOCTYPE html>
       <html>
@@ -995,7 +1000,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
       </html>
     ''';
 
-    _webViewController!.loadHtmlString(htmlContent);
+    _webViewController.loadHtmlString(htmlContent);
   }
 
   void _handleJavascriptMessage(String message) {
@@ -1060,10 +1065,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
           
           if (_isViewingContent) const SizedBox(width: 10),
           
-          // Main Action Button
+                    // Main Action Button
           Expanded(
             child: ElevatedButton.icon(
               onPressed: _isViewingContent ? _showCloseConfirmation : () {
+                _initializeWebViewController();
                 setState(() => _isViewingContent = true);
                 _resetInactivityTimer();
               },
@@ -1078,8 +1084,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
           ),
         ],
       ),
-    );
-  }
+    );  // <-- This semicolon should be here
+  }  // <-- This closes the _buildActionButtons method
 
   void _showCloseConfirmation() {
     showDialog(
@@ -1291,14 +1297,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
       final deviceInfo = await SessionManager.getDeviceInfo();
       final deviceFingerprint = await SessionManager.getDeviceFingerprint();
       
-      // Access content - FIXED: Using correct API method
+      // Access content
       final response = await ApiService.accessContent(
         pin,
         deviceId: deviceInfo['device_id'],
         deviceFingerprint: deviceFingerprint,
       );
 
-      // Extract response - FIXED: Expecting correct field names
+      // Extract response
       final encryptedContent = response['encrypted_content'] ?? response['content'];
       final iv = response['iv'];
       _contentId = response['content_id'] ?? '';
@@ -1314,7 +1320,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         throw Exception('Device limit reached');
       }
 
-      // Decrypt locally - FIXED: Using correct decrypt method (3 parameters)
+      // Decrypt locally
       _decryptedContent = EncryptionService.decryptData(
         encryptedContent, 
         iv, 
@@ -1389,8 +1395,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
           _updateTimerDisplay(_remainingSeconds);
           
           // Update webview timer
-          if (_webViewController != null && _remainingSeconds % 5 == 0) {
-            _webViewController!.runJavaScript('updateTimer($_remainingSeconds)');
+          if (_remainingSeconds % 5 == 0) {
+            _webViewController.runJavaScript('updateTimer($_remainingSeconds)');
           }
         });
       } else {
@@ -1453,7 +1459,6 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
     _inactivityTimer?.cancel();
     _autoCloseTimer?.cancel();
     
-    _webViewController = null;
     _decryptedContent = '';
     _remainingSeconds = 0;
     _contentId = '';

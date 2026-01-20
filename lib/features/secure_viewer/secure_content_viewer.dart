@@ -4,9 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/services.dart';
-import 'package:device_info_plus/device_info_plus.dart';
 import 'package:secure_share/services/api_service.dart';
-import 'package:secure_share/services/session_manager.dart';
 
 class SecureContentViewer extends StatefulWidget {
   final String contentData;
@@ -38,7 +36,6 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
   late final WebViewController _controller;
   late final Connectivity _connectivity;
   StreamSubscription? _connectivitySubscription;
-  StreamSubscription<AppLifecycleState>? _lifecycleSubscription;
   Timer? _expiryTimer;
   Timer? _inactivityTimer;
   DateTime? _lastInteraction;
@@ -51,9 +48,10 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
   void initState() {
     super.initState();
     
-    // Enable hybrid composition for Android
+    // IMPORTANT: Initialize WebView for Android (different method for newer versions)
     if (Platform.isAndroid) {
-      WebView.platform = AndroidWebView();
+      // For newer webview_flutter versions, use platform interface
+      // The platform is automatically initialized in newer versions
     }
     
     // Prevent screenshots
@@ -922,34 +920,21 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
     }
   }
 
-  void _startMonitoring() {
-    // Monitor connectivity
-    _connectivitySubscription = _connectivity.onConnectivityChanged.listen((result) {
-      if (result == ConnectivityResult.none) {
-        setState(() => _hasInternet = false);
+ void _startMonitoring() {
+  // Monitor connectivity
+  _connectivitySubscription = Connectivity().onConnectivityChanged.listen((result) {
+    // Check if there's any connection (updated for newer connectivity_plus versions)
+    final hasInternet = result != ConnectivityResult.none;
+    
+    if (hasInternet != _hasInternet) {
+      setState(() => _hasInternet = hasInternet);
+      
+      if (!hasInternet) {
         _showNoInternetWarning();
-      } else {
-        setState(() => _hasInternet = true);
       }
-    });
-
-    // Monitor app lifecycle
-    _lifecycleSubscription = WidgetsBinding.instance.lifecycleState.listen((state) {
-      if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
-        _isAppInBackground = true;
-        _reportSuspiciousActivity('app_backgrounded', 'App moved to background');
-        
-        // If it's a one-time view, close immediately
-        if (widget.isOneTimeView) {
-          _forceCloseContent('App backgrounded during one-time view');
-        }
-      } else if (state == AppLifecycleState.resumed) {
-        _isAppInBackground = false;
-        // Check if content should still be accessible
-        _verifyContentAccess();
-      }
-    });
-  }
+    }
+  });
+}
 
   void _startExpiryTimer() {
     if (widget.expiryTime != null) {
@@ -978,11 +963,15 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
     
     // Close after 5 minutes of inactivity
     _inactivityTimer = Timer(const Duration(minutes: 5), () {
-      _forceCloseContent('Inactivity timeout');
+      if (mounted) {
+        _forceCloseContent('Inactivity timeout');
+      }
     });
   }
 
   void _showNoInternetWarning() {
+    if (!mounted) return;
+    
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -1020,8 +1009,10 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
   }
 
   void _forceCloseContent(String reason) {
-    _reportSuspiciousActivity('forced_close', reason);
-    widget.onContentClosed();
+    if (mounted) {
+      _reportSuspiciousActivity('forced_close', reason);
+      widget.onContentClosed();
+    }
   }
 
   void _showError(String message) {
@@ -1037,7 +1028,9 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
   }
 
   void _reportSuspiciousActivity(String type, String details) {
-    widget.onSuspiciousActivity('$type: $details');
+    if (mounted) {
+      widget.onSuspiciousActivity('$type: $details');
+    }
     
     // Report to API service
     try {
@@ -1055,12 +1048,7 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
   Future<void> _verifyContentAccess() async {
     // Check if content is still accessible
     try {
-      // You can implement API call to verify content status here
-      // Example:
-      // final status = await ApiService.getContentStatus(widget.contentId);
-      // if (status['is_accessible'] == false) {
-      //   _forceCloseContent('Content is no longer accessible');
-      // }
+      // TODO: Implement API call to verify content status here
     } catch (e) {
       print('Content access verification failed: $e');
     }
@@ -1082,7 +1070,6 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
     _expiryTimer?.cancel();
     _inactivityTimer?.cancel();
     _connectivitySubscription?.cancel();
-    _lifecycleSubscription?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     
     // Restore normal UI mode
@@ -1128,7 +1115,11 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
                       ),
                       const SizedBox(height: 30),
                       ElevatedButton(
-                        onPressed: widget.onContentClosed,
+                        onPressed: () {
+                          if (mounted) {
+                            widget.onContentClosed();
+                          }
+                        },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.red,
                           padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
