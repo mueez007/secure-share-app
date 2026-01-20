@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:secure_share/services/api_service.dart';
+import 'package:secure_share/services/session_manager.dart';
 
 class SecureContentViewer extends StatefulWidget {
   final String contentData;
@@ -35,7 +38,7 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
   late final WebViewController _controller;
   late final Connectivity _connectivity;
   StreamSubscription? _connectivitySubscription;
-  StreamSubscription? _lifecycleSubscription;
+  StreamSubscription<AppLifecycleState>? _lifecycleSubscription;
   Timer? _expiryTimer;
   Timer? _inactivityTimer;
   DateTime? _lastInteraction;
@@ -47,6 +50,11 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
   @override
   void initState() {
     super.initState();
+    
+    // Enable hybrid composition for Android
+    if (Platform.isAndroid) {
+      WebView.platform = AndroidWebView();
+    }
     
     // Prevent screenshots
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -72,7 +80,7 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
       ..setNavigationDelegate(NavigationDelegate(
-        onNavigationRequest: (request) {
+        onNavigationRequest: (NavigationRequest request) {
           // Block all external navigation
           if (request.url.startsWith('http')) {
             _reportSuspiciousActivity('navigation_attempt', request.url);
@@ -80,15 +88,15 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
           }
           return NavigationDecision.navigate;
         },
-        onPageStarted: (url) {
+        onPageStarted: (String url) {
           print('Page started: $url');
         },
-        onPageFinished: (url) {
+        onPageFinished: (String url) {
           print('Page finished: $url');
           _injectProtectionScripts();
         },
       ))
-      ..addJavaScriptChannel('SecureShare', onMessageReceived: (message) {
+      ..addJavaScriptChannel('SecureShare', onMessageReceived: (JavaScriptMessage message) {
         _handleJavaScriptMessage(message.message);
       });
 
@@ -547,6 +555,305 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
     ''';
   }
 
+  String _buildVideoHtml() {
+    return '''
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <style>
+          * {
+            margin: 0;
+            padding: 0;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+          }
+          
+          body {
+            background: #000;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+          }
+          
+          .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 100%;
+            max-height: 100%;
+          }
+          
+          video {
+            width: 100%;
+            max-height: 100vh;
+            object-fit: contain;
+          }
+          
+          .protection-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: rgba(255, 0, 0, 0.9);
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-size: 16px;
+            font-weight: bold;
+            z-index: 9999;
+          }
+          
+          .watermark {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            color: rgba(255, 255, 255, 0.1);
+            font-size: 8px;
+            pointer-events: none;
+          }
+          
+          .controls-overlay {
+            display: none !important;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="protection-overlay">
+          🔒 PROTECTED VIDEO - Screen recording blocked
+        </div>
+        
+        <div class="video-container">
+          <video controls controlsList="nodownload noremoteplayback" disablePictureInPicture oncontextmenu="return false;">
+            <source src="${widget.contentData}" type="video/mp4">
+            Your browser does not support the video tag.
+          </video>
+        </div>
+        
+        <div class="watermark">${widget.contentId}</div>
+        
+        <script>
+          const video = document.querySelector('video');
+          if (video) {
+            video.addEventListener('contextmenu', e => {
+              e.preventDefault();
+              SecureShare.postMessage('video_context_menu');
+              return false;
+            });
+            
+            // Disable right-click menu on video
+            video.addEventListener('loadedmetadata', () => {
+              video.controls = true;
+              // Hide download button if browser supports it
+              if (video.controlsList && video.controlsList.supports('nodownload')) {
+                video.controlsList.add('nodownload');
+              }
+            });
+          }
+          
+          // Prevent keyboard shortcuts
+          document.addEventListener('keydown', e => {
+            // Disable space bar for play/pause
+            if (e.code === 'Space') {
+              e.preventDefault();
+            }
+          });
+        </script>
+      </body>
+      </html>
+    ''';
+  }
+
+  String _buildAudioHtml() {
+    return '''
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <style>
+          * {
+            margin: 0;
+            padding: 0;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+          }
+          
+          body {
+            background: #000;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            padding: 20px;
+          }
+          
+          .audio-container {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 40px;
+            border-radius: 20px;
+            text-align: center;
+            max-width: 500px;
+            width: 100%;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+          }
+          
+          .protection-banner {
+            background: linear-gradient(90deg, #ff0000, #ff8800);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            font-weight: bold;
+          }
+          
+          audio {
+            width: 100%;
+            margin-top: 20px;
+          }
+          
+          .watermark {
+            margin-top: 30px;
+            color: rgba(255, 255, 255, 0.2);
+            font-size: 10px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="audio-container">
+          <div class="protection-banner">
+            🔒 PROTECTED AUDIO - Downloads blocked
+          </div>
+          
+          <h3>Secure Audio Content</h3>
+          <p>${widget.fileName}</p>
+          
+          <audio controls controlsList="nodownload" oncontextmenu="return false;">
+            <source src="${widget.contentData}" type="audio/mpeg">
+            Your browser does not support the audio element.
+          </audio>
+          
+          <div class="watermark">${widget.contentId}</div>
+        </div>
+        
+        <script>
+          const audio = document.querySelector('audio');
+          if (audio) {
+            audio.addEventListener('contextmenu', e => {
+              e.preventDefault();
+              SecureShare.postMessage('audio_context_menu');
+              return false;
+            });
+          }
+        </script>
+      </body>
+      </html>
+    ''';
+  }
+
+  String _buildGenericHtml() {
+    return '''
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <style>
+          * {
+            margin: 0;
+            padding: 0;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+          }
+          
+          body {
+            background: #000;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            padding: 20px;
+            text-align: center;
+          }
+          
+          .generic-container {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 40px;
+            border-radius: 20px;
+            max-width: 600px;
+            width: 100%;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+          }
+          
+          .protection-banner {
+            background: linear-gradient(90deg, #ff0000, #ff8800);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            font-weight: bold;
+          }
+          
+          .content {
+            margin: 20px 0;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            word-break: break-all;
+            max-height: 300px;
+            overflow-y: auto;
+          }
+          
+          .watermark {
+            margin-top: 20px;
+            color: rgba(255, 255, 255, 0.2);
+            font-size: 10px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="generic-container">
+          <div class="protection-banner">
+            🔒 PROTECTED CONTENT
+          </div>
+          
+          <h3>Secure Content</h3>
+          <p>File: ${widget.fileName}</p>
+          <p>Type: ${widget.contentType}</p>
+          
+          <div class="content">
+            ${_escapeHtml(widget.contentData.length > 500 ? widget.contentData.substring(0, 500) + '...' : widget.contentData)}
+          </div>
+          
+          <p><small>This content is protected and cannot be saved or shared.</small></p>
+          
+          <div class="watermark">${widget.contentId}</div>
+        </div>
+        
+        <script>
+          document.addEventListener('contextmenu', e => {
+            e.preventDefault();
+            SecureShare.postMessage('generic_context_menu');
+            return false;
+          });
+        </script>
+      </body>
+      </html>
+    ''';
+  }
+
   String _escapeHtml(String text) {
     return text
         .replaceAll('&', '&amp;')
@@ -599,6 +906,9 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
       case 'devtools_shortcut':
       case 'image_context_menu':
       case 'long_press_detected':
+      case 'video_context_menu':
+      case 'audio_context_menu':
+      case 'generic_context_menu':
         _failedCaptureAttempts++;
         _reportSuspiciousActivity('capture_attempt', message);
         
@@ -715,27 +1025,44 @@ class _SecureContentViewerState extends State<SecureContentViewer> with WidgetsB
   }
 
   void _showError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.red,
-        duration: const Duration(seconds: 3),
-      ),
-    );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
   }
 
   void _reportSuspiciousActivity(String type, String details) {
     widget.onSuspiciousActivity('$type: $details');
-    ApiService.reportSuspiciousActivity(widget.contentId, type, SessionManager.getDeviceFingerprint());
+    
+    // Report to API service
+    try {
+      ApiService.reportSuspiciousActivity(
+        contentId: widget.contentId,
+        activityType: type,
+        deviceId: 'secure_viewer',
+        description: details,
+      );
+    } catch (e) {
+      print('Failed to report suspicious activity: $e');
+    }
   }
 
-  void _verifyContentAccess() async {
+  Future<void> _verifyContentAccess() async {
     // Check if content is still accessible
     try {
-      // Implement API call to verify content status
-      // If not accessible, close immediately
+      // You can implement API call to verify content status here
+      // Example:
+      // final status = await ApiService.getContentStatus(widget.contentId);
+      // if (status['is_accessible'] == false) {
+      //   _forceCloseContent('Content is no longer accessible');
+      // }
     } catch (e) {
-      _forceCloseContent('Content access verification failed');
+      print('Content access verification failed: $e');
     }
   }
 

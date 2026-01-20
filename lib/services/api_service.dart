@@ -1,48 +1,43 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
 
 class ApiService {
   static String _baseUrl = Platform.isAndroid ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
   static final Connectivity _connectivity = Connectivity();
-  
-  // Set custom base URL
+
   static void setBaseUrl(String url) {
     _baseUrl = url;
   }
-  
-  // Enhanced connection test
-  static Future<Map<String, dynamic>> testConnection() async {
+
+  static String get baseUrl => _baseUrl;
+
+  // 1. Connection Test - FIXED SIGNATURE
+  static Future<bool> testConnection() async {
     try {
       final connectivityResult = await _connectivity.checkConnectivity();
       if (connectivityResult == ConnectivityResult.none) {
-        throw Exception('No internet connection');
+        return false;
       }
-      
+
       final response = await http.get(
-        Uri.parse('$_baseUrl/health'),
+        Uri.parse('$_baseUrl/'), // Your backend root endpoint
         headers: {'Accept': 'application/json'},
-      ).timeout(const Duration(seconds: 10));
-      
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return {
-          'connected': true,
-          'message': data['message'],
-          'version': data['version'],
-          'uptime': data['uptime'],
-        };
-      }
-      throw Exception('Server error: ${response.statusCode}');
+      ).timeout(const Duration(seconds: 3));
+
+      return response.statusCode == 200;
     } catch (e) {
-      throw Exception('Connection failed: $e');
+      print('Connection Error: $e');
+      return false;
     }
   }
-  
-  // Upload content with all features
+
+  // 2. Upload Content - FIXED to match ShareScreen call
   static Future<Map<String, dynamic>> uploadContent({
-    required Map<String, dynamic> encryptedData,
+    required Uint8List encryptedBytes, // Keep this as Uint8List
+    required String iv,
     required String accessMode,
     int? durationMinutes,
     int deviceLimit = 1,
@@ -52,50 +47,56 @@ class ApiService {
     String? mimeType,
     bool dynamicPIN = false,
     int? pinRotationMinutes,
-    bool autoTerminateOnSuspicion = false,
+    bool autoTerminateOnSuspicion = true,
     bool requireBiometric = false,
     List<String>? trustedDevices,
   }) async {
     try {
-      final url = Uri.parse('$_baseUrl/content/upload');
+      final uri = Uri.parse('$_baseUrl/content/upload'); // Fixed endpoint
       
-      print('📤 Uploading $contentType content...');
+      // Create multipart request
+      var request = http.MultipartRequest('POST', uri);
       
-      final body = {
-        'encrypted_content': encryptedData['content'],
-        'iv': encryptedData['iv'],
-        'auth_tag': encryptedData['auth_tag'],
-        'access_mode': accessMode,
-        'duration_minutes': durationMinutes,
-        'device_limit': deviceLimit,
-        'content_type': contentType,
-        'file_name': fileName,
-        'file_size': fileSize,
-        'mime_type': mimeType,
-        'security_options': {
-          'dynamic_pin': dynamicPIN,
-          'pin_rotation_minutes': pinRotationMinutes,
-          'auto_terminate_on_suspicion': autoTerminateOnSuspicion,
-          'require_biometric': requireBiometric,
-          'trusted_devices': trustedDevices,
-        },
-        'encryption_algo': encryptedData['encryption_algo'] ?? 'AES-256-GCM',
-        'timestamp': DateTime.now().toUtc().toIso8601String(),
-      };
+      // Add encrypted file
+      request.files.add(http.MultipartFile.fromBytes(
+        'file',
+        encryptedBytes,
+        filename: fileName ?? 'secure_content.dat',
+      ));
       
-      final response = await http.post(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Request-ID': DateTime.now().millisecondsSinceEpoch.toString(),
-        },
-        body: jsonEncode(body),
-      ).timeout(const Duration(seconds: 30));
+      // Add form fields
+      request.fields['iv'] = iv;
+      request.fields['access_mode'] = accessMode;
+      request.fields['device_limit'] = deviceLimit.toString();
+      request.fields['content_type'] = contentType;
+      request.fields['auto_terminate'] = autoTerminateOnSuspicion.toString();
+      request.fields['require_biometric'] = requireBiometric.toString();
+      request.fields['dynamic_pin'] = dynamicPIN.toString();
       
-      if (response.statusCode == 201) {
-        final data = jsonDecode(response.body);
-        print('✅ Upload successful! PIN: ${data['pin']}');
-        return data;
+      if (durationMinutes != null) {
+        request.fields['duration_minutes'] = durationMinutes.toString();
+      }
+      if (fileName != null) {
+        request.fields['file_name'] = fileName;
+      }
+      if (fileSize != null) {
+        request.fields['file_size'] = fileSize.toString();
+      }
+      if (mimeType != null) {
+        request.fields['mime_type'] = mimeType;
+      }
+      if (pinRotationMinutes != null) {
+        request.fields['pin_rotation_minutes'] = pinRotationMinutes.toString();
+      }
+      if (trustedDevices != null && trustedDevices.isNotEmpty) {
+        request.fields['trusted_devices'] = jsonEncode(trustedDevices);
+      }
+      
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        return jsonDecode(response.body);
       } else {
         throw Exception('Upload failed (${response.statusCode}): ${response.body}');
       }
@@ -104,8 +105,8 @@ class ApiService {
       rethrow;
     }
   }
-  
-  // Access content with device tracking
+
+  // 3. Access Content - FIXED SIGNATURE
   static Future<Map<String, dynamic>> accessContent(
     String pin, {
     String? deviceId,
@@ -115,14 +116,10 @@ class ApiService {
     try {
       final url = Uri.parse('$_baseUrl/content/access/$pin');
       
-      print('🔑 Accessing content with PIN: $pin');
-      
       final body = {
         'device_id': deviceId ?? 'unknown_device',
         'device_fingerprint': deviceFingerprint,
         'biometric_verified': biometricVerified,
-        'access_time': DateTime.now().toUtc().toIso8601String(),
-        'client_version': '1.0.0',
         'platform': Platform.operatingSystem,
       };
       
@@ -134,16 +131,10 @@ class ApiService {
       
       if (response.statusCode == 200) {
         return jsonDecode(response.body);
-      } else if (response.statusCode == 401) {
-        throw Exception('Invalid PIN or access denied');
-      } else if (response.statusCode == 403) {
-        throw Exception('Device limit reached or unauthorized device');
+      } else if (response.statusCode == 404) {
+        throw Exception('PIN not found');
       } else if (response.statusCode == 410) {
-        throw Exception('Content expired or already viewed');
-      } else if (response.statusCode == 423) {
-        throw Exception('Content is paused by sender');
-      } else if (response.statusCode == 429) {
-        throw Exception('Too many failed attempts. Try again later');
+        throw Exception('Content expired or destroyed');
       } else {
         throw Exception('Access failed: ${response.statusCode}');
       }
@@ -152,172 +143,31 @@ class ApiService {
       rethrow;
     }
   }
-  
-  // Sender: Get content status
-  static Future<Map<String, dynamic>> getContentStatus(String contentId, String authToken) async {
-    final url = Uri.parse('$_baseUrl/content/status/$contentId');
-    
-    final response = await http.get(
-      url,
-      headers: {
-        'Authorization': 'Bearer $authToken',
-        'Accept': 'application/json',
-      },
-    );
-    
-    if (response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
-    throw Exception('Failed to get status: ${response.statusCode}');
-  }
-  
-  // Sender: Get analytics
-  static Future<Map<String, dynamic>> getContentAnalytics(String contentId, String authToken) async {
-    final url = Uri.parse('$_baseUrl/content/analytics/$contentId');
-    
-    final response = await http.get(
-      url,
-      headers: {
-        'Authorization': 'Bearer $authToken',
-        'Accept': 'application/json',
-      },
-    );
-    
-    if (response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
-    throw Exception('Failed to get analytics: ${response.statusCode}');
-  }
-  
-  // Sender: Pause content
-  static Future<void> pauseContent(String contentId, String authToken) async {
-    final url = Uri.parse('$_baseUrl/content/pause/$contentId');
-    
-    final response = await http.post(
-      url,
-      headers: {'Authorization': 'Bearer $authToken'},
-    );
-    
-    if (response.statusCode != 200) {
-      throw Exception('Failed to pause content: ${response.statusCode}');
-    }
-  }
-  
-  // Sender: Resume content
-  static Future<void> resumeContent(String contentId, String authToken) async {
-    final url = Uri.parse('$_baseUrl/content/resume/$contentId');
-    
-    final response = await http.post(
-      url,
-      headers: {'Authorization': 'Bearer $authToken'},
-    );
-    
-    if (response.statusCode != 200) {
-      throw Exception('Failed to resume content: ${response.statusCode}');
-    }
-  }
-  
-  // Sender: Extend content
-  static Future<void> extendContent(
-    String contentId,
-    String authToken, {
-    int? additionalMinutes,
-    int? additionalDevices,
+
+  // 4. Report Suspicious Activity - ADDED
+  static Future<void> reportSuspiciousActivity({
+    required String contentId,
+    required String activityType,
+    required String deviceId,
+    String? description,
   }) async {
-    final url = Uri.parse('$_baseUrl/content/extend/$contentId');
-    
-    final body = {
-      'additional_minutes': additionalMinutes,
-      'additional_devices': additionalDevices,
-    };
-    
-    final response = await http.post(
-      url,
-      headers: {
-        'Authorization': 'Bearer $authToken',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode(body),
-    );
-    
-    if (response.statusCode != 200) {
-      throw Exception('Failed to extend content: ${response.statusCode}');
+    try {
+      final url = Uri.parse('$_baseUrl/security/report');
+      
+      final body = {
+        'content_id': contentId,
+        'activity_type': activityType,
+        'device_id': deviceId,
+        'description': description ?? '',
+      };
+      
+      await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 5));
+    } catch (e) {
+      print('⚠️ Failed to report suspicious activity: $e');
     }
-  }
-  
-  // Sender: Terminate content (instant destruction)
-  static Future<Map<String, dynamic>> terminateContent(
-    String contentId,
-    String authToken, {
-    String reason = 'manual_termination',
-  }) async {
-    final url = Uri.parse('$_baseUrl/content/terminate/$contentId');
-    
-    final body = {'reason': reason};
-    
-    final response = await http.delete(
-      url,
-      headers: {
-        'Authorization': 'Bearer $authToken',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode(body),
-    );
-    
-    if (response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
-    throw Exception('Failed to terminate content: ${response.statusCode}');
-  }
-  
-  // Sender: Get history
-  static Future<List<dynamic>> getSenderHistory(String authToken) async {
-    final url = Uri.parse('$_baseUrl/sender/history');
-    
-    final response = await http.get(
-      url,
-      headers: {'Authorization': 'Bearer $authToken'},
-    );
-    
-    if (response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
-    throw Exception('Failed to get history: ${response.statusCode}');
-  }
-  
-  // Receiver: Stream content (for large files)
-  static Future<http.StreamedResponse> streamContent(
-    String contentId,
-    String accessToken,
-  ) async {
-    final url = Uri.parse('$_baseUrl/content/stream/$contentId');
-    
-    final request = http.Request('GET', url);
-    request.headers['Authorization'] = 'Bearer $accessToken';
-    request.headers['Accept'] = 'application/octet-stream';
-    
-    return await request.send();
-  }
-  
-  // Report suspicious activity
-  static Future<void> reportSuspiciousActivity(
-    String contentId,
-    String activityType,
-    String deviceId,
-  ) async {
-    final url = Uri.parse('$_baseUrl/security/report');
-    
-    final body = {
-      'content_id': contentId,
-      'activity_type': activityType,
-      'device_id': deviceId,
-      'timestamp': DateTime.now().toUtc().toIso8601String(),
-    };
-    
-    await http.post(
-      url,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(body),
-    );
   }
 }

@@ -1,23 +1,21 @@
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
-import 'dart:io'; // ADD THIS for File class
+import 'dart:io'; 
 import 'package:encrypt/encrypt.dart' as enc;
 import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class EncryptionService {
-  static final FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
   
-  // Generate master key from passphrase (zero-knowledge)
+  // 1. Generate master key from passphrase (zero-knowledge)
   static Future<String> generateMasterKey(String passphrase, {String? biometricKey}) async {
     try {
-      // Combine passphrase with biometric key if available
       final combined = biometricKey != null 
           ? '$passphrase:$biometricKey:${DateTime.now().millisecondsSinceEpoch}'
           : '$passphrase:${DateTime.now().millisecondsSinceEpoch}';
       
-      // Use PBKDF2 for key derivation
       final salt = utf8.encode('secure_share_salt_${DateTime.now().millisecondsSinceEpoch}');
       final keyBytes = sha256.convert(utf8.encode(combined)).bytes;
       final derivedKey = pbkdf2(sha256, keyBytes, salt, 100000, 32);
@@ -33,21 +31,25 @@ class EncryptionService {
       throw Exception('Key generation failed: $e');
     }
   }
+
+  // 2. Generate Random Key (Helper for simple usage)
+  static String generateRandomKey() {
+    final random = Random.secure();
+    final values = List<int>.generate(32, (i) => random.nextInt(256));
+    return base64Url.encode(values);
+  }
   
-  // Generate content encryption key
+  // 3. Generate content encryption key
   static Map<String, String> generateContentKey(String masterKey) {
     try {
-      // Derive content key from master key
       final masterBytes = base64Url.decode(masterKey);
       final random = Random.secure();
       final randomBytes = List<int>.generate(16, (i) => random.nextInt(256));
       
-      // Combine and hash
       final combined = Uint8List.fromList([...masterBytes, ...randomBytes]);
       final contentKeyBytes = sha256.convert(combined).bytes.sublist(0, 32);
       final contentKey = base64Url.encode(contentKeyBytes);
       
-      // Generate random IV
       final iv = enc.IV.fromSecureRandom(16);
       
       return {
@@ -60,69 +62,96 @@ class EncryptionService {
     }
   }
   
-  // Encrypt data with AES-256-GCM - FIXED VERSION
+  // 4. Encrypt Text (String -> Map<String, String>)
   static Map<String, String> encryptData(String plainText, String contentKey, String iv) {
     try {
       final keyBytes = base64Url.decode(contentKey);
       final key = enc.Key(Uint8List.fromList(keyBytes));
       final ivObj = enc.IV.fromBase64(iv);
       
-      // Use AES-CBC instead of GCM to avoid complex auth tag handling
-      final encrypter = enc.Encrypter(enc.AES(key));
+      // Use AES-CBC (no mode parameter needed in latest version)
+      final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
       final encrypted = encrypter.encrypt(plainText, iv: ivObj);
       
       return {
         'content': encrypted.base64,
         'iv': iv,
+        'auth_tag': '', // CBC doesn't use auth tag
         'encryption_algo': 'AES-256-CBC',
       };
     } catch (e) {
+      print('Encryption error: $e');
       throw Exception('Encryption failed: $e');
     }
   }
+
+  // 5. Encrypt Raw Bytes (Uint8List -> Map<String, dynamic>)
+  static Map<String, dynamic> encryptBytes(Uint8List fileBytes, String keyString) {
+    try {
+      final keyBytes = base64Url.decode(keyString);
+      final key = enc.Key(Uint8List.fromList(keyBytes));
+      final iv = enc.IV.fromSecureRandom(16);
+
+      // Use AES-CBC
+      final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
+      
+      // Encrypt the raw bytes
+      final encrypted = encrypter.encryptBytes(fileBytes, iv: iv);
+
+      return {
+        'bytes': encrypted.bytes, // Return Uint8List
+        'iv': iv.base64,
+        'auth_tag': '',
+      };
+    } catch (e) {
+      print('File Encryption Error: $e');
+      throw Exception('File Encryption Error: $e');
+    }
+  }
   
-  // Decrypt data - FIXED VERSION
+  // 6. Decrypt Data (String -> String) - FIXED SIGNATURE
   static String decryptData(String encryptedContent, String iv, String contentKey) {
     try {
       final keyBytes = base64Url.decode(contentKey);
       final key = enc.Key(Uint8List.fromList(keyBytes));
       final ivObj = enc.IV.fromBase64(iv);
-      final encrypter = enc.Encrypter(enc.AES(key));
+      
+      final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
       final encrypted = enc.Encrypted.fromBase64(encryptedContent);
       
       return encrypter.decrypt(encrypted, iv: ivObj);
     } catch (e) {
+      print('Decryption error: $e');
       throw Exception('Decryption failed: Invalid key or corrupted data');
     }
   }
-  
-  // Overloaded decryptData with authTag (for backward compatibility)
+
+  // 7. Decrypt Data with auth_tag parameter (for backward compatibility)
   static String decryptDataWithAuth(String encryptedContent, String iv, String authTag, String contentKey) {
-    // For now, ignore authTag and use standard decryption
+    // Ignore authTag for CBC mode
     return decryptData(encryptedContent, iv, contentKey);
   }
-  
-  // Encrypt file to base64
-  static Future<Map<String, dynamic>> encryptFile(File file, String contentKey, String iv) async {
+
+  // 8. Decrypt Raw Bytes (Uint8List -> Uint8List)
+  static Uint8List decryptBytes(Uint8List encryptedBytes, String ivString, String keyString) {
     try {
-      final bytes = await file.readAsBytes();
-      final base64Data = base64.encode(bytes);
-      
-      // Encrypt the base64 string
-      final encrypted = encryptData(base64Data, contentKey, iv);
-      
-      return {
-        ...encrypted,
-        'file_name': file.path.split('/').last,
-        'file_size': bytes.length,
-        'mime_type': _getMimeType(file.path),
-      };
+      final keyBytes = base64Url.decode(keyString);
+      final key = enc.Key(Uint8List.fromList(keyBytes));
+      final iv = enc.IV.fromBase64(ivString);
+
+      final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
+      final encrypted = enc.Encrypted(encryptedBytes);
+
+      // Decrypt to List<int> and convert to Uint8List
+      List<int> decrypted = encrypter.decryptBytes(encrypted, iv: iv);
+      return Uint8List.fromList(decrypted);
     } catch (e) {
-      throw Exception('File encryption failed: $e');
+      print('Byte decryption error: $e');
+      throw Exception('Byte Decryption Failed: Invalid Key or Corrupt Data');
     }
   }
   
-  // Destroy keys (zero-knowledge enforcement)
+  // 9. Destroy keys (zero-knowledge enforcement)
   static Future<void> destroyKeys(String keyId) async {
     try {
       // Remove from secure storage
@@ -130,14 +159,13 @@ class EncryptionService {
       await _secureStorage.delete(key: 'iv_$keyId');
       await _secureStorage.delete(key: 'auth_tag_$keyId');
       
-      // Clear memory
-      // Note: In real implementation, use secure memory clearing
+      print('✅ Keys destroyed for: $keyId');
     } catch (e) {
-      print('Key destruction warning: $e');
+      print('⚠️ Key destruction warning: $e');
     }
   }
   
-  // Generate proof of destruction
+  // 10. Generate proof of destruction
   static Map<String, dynamic> generateDestructionProof(String contentId, String reason) {
     final timestamp = DateTime.now().toUtc().toIso8601String();
     final proofData = '$contentId:$reason:$timestamp';
@@ -152,7 +180,8 @@ class EncryptionService {
     };
   }
   
-  static String _getMimeType(String path) {
+  // 11. Helper: Get MIME type from file path
+  static String getMimeType(String path) {
     final ext = path.split('.').last.toLowerCase();
     switch (ext) {
       case 'jpg':
@@ -169,7 +198,7 @@ class EncryptionService {
     }
   }
   
-  // PBKDF2 implementation
+  // 12. PBKDF2 implementation
   static Uint8List pbkdf2(Hash hash, List<int> password, List<int> salt, int iterations, int keyLength) {
     final hLen = hash.blockSize;
     final l = (keyLength + hLen - 1) ~/ hLen;

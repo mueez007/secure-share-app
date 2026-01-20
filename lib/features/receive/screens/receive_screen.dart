@@ -45,13 +45,20 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
   Timer? _inactivityTimer;
   Timer? _autoCloseTimer;
   StreamSubscription? _connectivitySubscription;
-  StreamSubscription? _lifecycleSubscription;
+  StreamSubscription<AppLifecycleState>? _lifecycleSubscription;
   WebViewController? _webViewController;
   DateTime? _lastInteractionTime;
+  String _contentId = '';
 
   @override
   void initState() {
     super.initState();
+    
+    // Enable hybrid composition for Android WebView
+    if (Platform.isAndroid) {
+      WebView.platform = AndroidWebView();
+    }
+    
     WidgetsBinding.instance.addObserver(this);
     _checkBackendConnection();
     _startConnectivityMonitoring();
@@ -117,9 +124,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
   void _verifyContentAccess() async {
     if (!_contentLoaded) return;
     
-    // Check if content is still valid
+    // Check if content is still accessible
     try {
-      // Implement content verification with backend
+      // TODO: Implement content verification with backend API
+      // Example: await ApiService.getContentStatus(_contentId);
     } catch (e) {
       _autoCloseContent('Content access verification failed');
     }
@@ -127,12 +135,12 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
 
   Future<void> _checkBackendConnection() async {
     try {
-      final connection = await ApiService.testConnection();
-      if (connection['connected'] != true) {
+      final isConnected = await ApiService.testConnection();
+      if (!isConnected) {
         setState(() {
           _errorMessage = 'Cannot connect to backend server.\n\n'
               'Make sure backend is running at:\n'
-              'http://10.0.2.2:8000\n\n'
+              '${ApiService.baseUrl}\n\n'
               'Start it with:\n'
               'python -m uvicorn main:app --reload --host 0.0.2.2 --port 8000';
         });
@@ -346,9 +354,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
               prefixIcon: const Icon(Icons.key),
               hintText: 'Paste the encryption key here',
               suffixIcon: IconButton(
-                icon: Icon(_keyController.text.isEmpty ? Icons.visibility_off : Icons.visibility),
+                icon: const Icon(Icons.visibility_off),
                 onPressed: () {
-                  // Toggle visibility - in real app, use proper state management
+                  // Toggle visibility - TODO: Implement
                 },
               ),
             ),
@@ -441,8 +449,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
                   _buildSecurityFeature('📵', 'No Screenshots', 'Screenshots and recording blocked'),
                   _buildSecurityFeature('🌐', 'Online Only', 'Content never saved to device'),
                   _buildSecurityFeature('⏰', 'Time-Limited', 'Auto-destroys after expiry'),
-                  _buildSecurityFeature('📊', 'Device Limited', 'Access restricted to $_viewsRemaining device(s)'),
-                  _buildSecurityFeature('🚨', 'Auto-Terminate', 'Content destroyed on suspicion'),
+                  _buildSecurityFeature('📊', 'Device Limited', 'Access restricted to specific devices'),
+                  _buildSecurityFeature('🚨', 'Auto-Terminate', 'Content destroyed on security violation'),
                 ],
               ),
             ),
@@ -699,26 +707,26 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
   Widget _buildSecureWebView(bool isDark) {
     return Stack(
       children: [
-        // WebView
+        // WebView - FIXED CONFIGURATION
         WebView(
           initialUrl: 'about:blank',
           javascriptMode: JavascriptMode.unrestricted,
-          onWebViewCreated: (controller) {
+          onWebViewCreated: (WebViewController controller) {
             _webViewController = controller;
             _loadContentIntoWebView();
           },
-          navigationDelegate: (request) { 
+          navigationDelegate: (NavigationRequest request) { 
             // Block all external navigation
             _reportSuspiciousActivity('navigation_attempt', request.url);
             return NavigationDecision.prevent;
           },
-          onPageStarted: (url) {
+          onPageStarted: (String url) {
             _resetInactivityTimer();
           },
           javascriptChannels: <JavascriptChannel>{
             JavascriptChannel(
               name: 'SecurityChannel',
-              onMessageReceived: (message) {
+              onMessageReceived: (JavascriptMessage message) {
                 _handleJavascriptMessage(message.message);
               },
             ),
@@ -726,7 +734,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
           gestureNavigationEnabled: false,
         ),
 
-        // No Internet Overlay
+        // No Internet Overlay - FIXED CONTAINER
         if (!_hasInternet)
           Container(
             color: Colors.black.withOpacity(0.95),
@@ -902,7 +910,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         <div class="timer" id="timer">Time: --:--</div>
         
         <div class="content-area" id="content">
-          ${_contentType == 'text' ? _escapeHtml(_decryptedContent) : ''}
+          ${_escapeHtml(_decryptedContent)}
         </div>
         
         <div class="watermark">SECURE_VIEW_${DateTime.now().millisecondsSinceEpoch}</div>
@@ -1232,7 +1240,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
     print('🚨 Suspicious activity: $type - $details');
     
     // Report to backend
-    ApiService.reportSuspiciousActivity('content_id', type, 'device_fingerprint');
+    if (_contentId.isNotEmpty) {
+      ApiService.reportSuspiciousActivity(
+        contentId: _contentId,
+        activityType: type,
+        deviceId: 'device_fingerprint',
+        description: details,
+      );
+    }
     
     // Update local state
     if (type.contains('screenshot') || details.contains('screen')) {
@@ -1276,19 +1291,19 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
       final deviceInfo = await SessionManager.getDeviceInfo();
       final deviceFingerprint = await SessionManager.getDeviceFingerprint();
       
-      // Access content
+      // Access content - FIXED: Using correct API method
       final response = await ApiService.accessContent(
         pin,
         deviceId: deviceInfo['device_id'],
         deviceFingerprint: deviceFingerprint,
       );
 
-      // Extract response
-      final encryptedContent = response['encrypted_content'];
+      // Extract response - FIXED: Expecting correct field names
+      final encryptedContent = response['encrypted_content'] ?? response['content'];
       final iv = response['iv'];
-      final authTag = response['auth_tag'];
-      _viewsRemaining = response['views_remaining'] ?? 0;
-      _accessMode = response['access_mode'] ?? '';
+      _contentId = response['content_id'] ?? '';
+      _viewsRemaining = response['views_remaining'] ?? 1;
+      _accessMode = response['access_mode'] ?? 'time_based';
       final expiryTime = response['expiry_time'];
       _contentType = response['content_type'] ?? 'text';
       _fileName = response['file_name'] ?? 'secure_content';
@@ -1299,11 +1314,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         throw Exception('Device limit reached');
       }
 
-      // Decrypt locally
+      // Decrypt locally - FIXED: Using correct decrypt method (3 parameters)
       _decryptedContent = EncryptionService.decryptData(
         encryptedContent, 
         iv, 
-        authTag, 
         key,
       );
 
@@ -1335,9 +1349,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
       String errorMsg = e.toString().replaceAll('Exception: ', '');
       if (errorMsg.contains('Device limit reached')) {
         errorMsg = 'Device limit reached. Cannot access from this device.';
-      } else if (errorMsg.contains('expired')) {
+      } else if (errorMsg.contains('expired') || errorMsg.contains('410')) {
         errorMsg = 'Content has expired and been destroyed.';
-      } else if (errorMsg.contains('PIN')) {
+      } else if (errorMsg.contains('PIN') || errorMsg.contains('404')) {
         errorMsg = 'Invalid PIN. $_failedAttempts failed attempt(s).';
       } else if (errorMsg.contains('Decryption')) {
         errorMsg = 'Decryption failed. Check your encryption key.';
@@ -1429,6 +1443,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         _timeRemaining = '00:00:00';
         _remainingSeconds = 0;
         _errorMessage = '';
+        _contentId = '';
       });
     }
   }
@@ -1441,6 +1456,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
     _webViewController = null;
     _decryptedContent = '';
     _remainingSeconds = 0;
+    _contentId = '';
     
     // Clear secure storage
     SessionManager.clearSession();
@@ -1474,18 +1490,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
   String _getStatusBarTitle() {
     if (_accessMode == 'one_time') return 'ONE-TIME VIEW - WILL SELF-DESTRUCT';
     if (_remainingSeconds <= 0) return 'EXPIRED - CLOSING SOON';
-    return 'SECURE CONTACT VIEWER - ACTIVE';
-  }
-
-  String _getContentTypeIcon() {
-    switch (_contentType) {
-      case 'image': return '🖼️';
-      case 'pdf': return '📄';
-      case 'video': return '🎥';
-      case 'audio': return '🎵';
-      case 'document': return '📝';
-      default: return '📃';
-    }
+    return 'SECURE CONTENT VIEWER - ACTIVE';
   }
 
   IconData _getContentTypeIconData() {

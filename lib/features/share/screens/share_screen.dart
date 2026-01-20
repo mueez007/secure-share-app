@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -9,7 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:secure_share/services/api_service.dart';
 import 'package:secure_share/services/encryption_service.dart';
 import 'package:secure_share/services/session_manager.dart';
-import 'dart:math'; // Add this for Random
+import 'dart:math';
 
 class ShareScreen extends StatefulWidget {
   final String sharedText;
@@ -44,7 +46,6 @@ class _ShareScreenState extends State<ShareScreen> {
   String? _masterPassphrase;
   String? _contentKey;
   String? _contentIV;
-  String? _contentAuthTag;
   
   // Dynamic PIN settings
   int _pinRotationInterval = 60; // minutes
@@ -59,27 +60,25 @@ class _ShareScreenState extends State<ShareScreen> {
   }
 
   Future<void> _generateMasterKey() async {
-    // Generate a random passphrase for this session
     final random = Random.secure();
     final words = List.generate(6, (_) => random.nextInt(10000).toString());
     _masterPassphrase = words.join('-');
     
-    // Generate master key
     try {
-      final masterKey = await EncryptionService.generateMasterKey(_masterPassphrase!);
-      print('Generated master key');
+      // Generate a simple key for this session
+      _contentKey = EncryptionService.generateRandomKey();
       
-      // Generate content key
-      final keyData = EncryptionService.generateContentKey(masterKey);
-      _contentKey = keyData['content_key'];
-      _contentIV = keyData['iv'];
+      // Generate IV
+      final random = Random.secure();
+      final ivBytes = List<int>.generate(16, (i) => random.nextInt(256));
+      _contentIV = base64Url.encode(ivBytes);
       
-      // Store key ID for later management
-      final keyId = keyData['key_id'];
-      await SessionManager.storeAccessToken('current_content_key', _contentKey!);
-      
+      print('✅ Generated encryption key and IV');
     } catch (e) {
       print('Key generation error: $e');
+      // Fallback: generate simple key
+      _contentKey = 'key_${DateTime.now().millisecondsSinceEpoch}';
+      _contentIV = 'iv_${DateTime.now().millisecondsSinceEpoch}';
     }
   }
 
@@ -527,10 +526,9 @@ class _ShareScreenState extends State<ShareScreen> {
   }
 
   Future<void> _pickFile() async {
-    final picker = ImagePicker();
-    
     try {
       if (_selectedFileType == 'image') {
+        final picker = ImagePicker();
         final pickedFile = await picker.pickImage(source: ImageSource.gallery);
         if (pickedFile != null) {
           setState(() {
@@ -539,13 +537,20 @@ class _ShareScreenState extends State<ShareScreen> {
           });
         }
       } else {
-        // For other file types, you'd use file_picker package
-        // For now, just use image picker
-        final pickedFile = await picker.pickImage(source: ImageSource.gallery);
-        if (pickedFile != null) {
+        FileType type = FileType.any;
+        if (_selectedFileType == 'video') type = FileType.video;
+        if (_selectedFileType == 'pdf') type = FileType.custom;
+        if (_selectedFileType == 'audio') type = FileType.audio;
+
+        FilePickerResult? result = await FilePicker.platform.pickFiles(
+          type: type,
+          allowedExtensions: _selectedFileType == 'pdf' ? ['pdf'] : null,
+        );
+
+        if (result != null && result.files.isNotEmpty && result.files.first.path != null) {
           setState(() {
-            _selectedFile = File(pickedFile.path);
-            _fileName = pickedFile.name;
+            _selectedFile = File(result.files.first.path!);
+            _fileName = result.files.first.name;
           });
         }
       }
@@ -620,6 +625,7 @@ class _ShareScreenState extends State<ShareScreen> {
       return;
     }
 
+    // Validate encryption keys
     if (_contentKey == null || _contentIV == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Encryption keys not ready. Please try again.'), backgroundColor: Colors.red),
@@ -638,63 +644,47 @@ class _ShareScreenState extends State<ShareScreen> {
         throw Exception('Backend not running!\n\nStart it with:\npython -m uvicorn main:app --reload --host 0.0.2.2 --port 8000');
       }
 
-      String contentToEncrypt;
-      String contentType = _selectedFileType;
-      String? fileName;
-      int? fileSize;
-      String? mimeType;
+      Uint8List dataBytes;
+      String mimeType;
 
       if (_selectedFileType == 'text') {
-        contentToEncrypt = _textController!.text;
+        dataBytes = Uint8List.fromList(utf8.encode(_textController!.text));
+        mimeType = 'text/plain';
       } else {
-        // Read file as base64
-        final fileBytes = await _selectedFile!.readAsBytes();
-        contentToEncrypt = base64.encode(fileBytes);
-        
-        // Get file info
-        fileName = _fileName;
-        fileSize = fileBytes.length;
+        dataBytes = await _selectedFile!.readAsBytes();
         mimeType = _getMimeType(_selectedFile!.path);
       }
 
-      // Encrypt the content
+      // Encrypt Data
       print('🔐 Encrypting content...');
-      final encryptedData = EncryptionService.encryptData(
-        contentToEncrypt, 
-        _contentKey!, 
-        _contentIV!
-      );
+      final encryptedResult = EncryptionService.encryptBytes(dataBytes, _contentKey!);
+      final Uint8List encryptedBytes = encryptedResult['bytes'] as Uint8List;
+      final String iv = encryptedResult['iv'] as String;
+
+      // Get device fingerprint
+      final deviceFingerprint = await SessionManager.getDeviceFingerprint();
 
       // Calculate duration
       int? durationMinutes;
       if (_selectedAccessMode == 'time_based') {
         switch (_selectedTimeUnit) {
-          case 'minutes':
-            durationMinutes = _timeValue;
-            break;
-          case 'hours':
-            durationMinutes = _timeValue * 60;
-            break;
-          case 'days':
-            durationMinutes = _timeValue * 1440;
-            break;
+          case 'minutes': durationMinutes = _timeValue; break;
+          case 'hours': durationMinutes = _timeValue * 60; break;
+          case 'days': durationMinutes = _timeValue * 1440; break;
         }
       }
 
-      // Get device info for trusted devices
-      final deviceInfo = await SessionManager.getDeviceInfo();
-      final deviceFingerprint = await SessionManager.getDeviceFingerprint();
-
-      // Upload to backend
+      // Upload to backend - FIXED: Using correct parameters
       print('📤 Uploading to backend...');
       final response = await ApiService.uploadContent(
-        encryptedData: encryptedData,
+        encryptedBytes: encryptedBytes,
+        iv: iv,
         accessMode: _selectedAccessMode,
         durationMinutes: durationMinutes,
         deviceLimit: _deviceLimit,
-        contentType: contentType,
-        fileName: fileName,
-        fileSize: fileSize,
+        contentType: _selectedFileType,
+        fileName: _fileName.isNotEmpty ? _fileName : 'secure_content.dat',
+        fileSize: encryptedBytes.length,
         mimeType: mimeType,
         dynamicPIN: _enableDynamicPIN,
         pinRotationMinutes: _enableDynamicPIN ? _pinRotationInterval : null,
@@ -705,17 +695,15 @@ class _ShareScreenState extends State<ShareScreen> {
 
       final pin = response['pin'];
       final contentId = response['content_id'];
-      final expiryTime = response['expiry_time'];
+      final expiryTime = response['expiry_time'] ?? 'Not specified';
       
       print('✅ Upload successful! PIN: $pin, Content ID: $contentId');
 
-      // Store content key with content ID for later management
+      // Store local session info
       await SessionManager.storeAccessToken('content_key_$contentId', _contentKey!);
-      await SessionManager.storeAccessToken('content_iv_$contentId', _contentIV!);
-      await SessionManager.storeAccessToken('content_auth_tag_$contentId', encryptedData['auth_tag']!);
 
       // Show PIN and Key dialog
-      await _showShareDialog(pin, _contentKey!, expiryTime, contentType, contentId);
+      await _showShareDialog(pin, _contentKey!, expiryTime, _selectedFileType, contentId);
 
       // Clear form
       if (mounted) {
@@ -723,9 +711,6 @@ class _ShareScreenState extends State<ShareScreen> {
         _textController?.clear();
         _selectedFile = null;
         _fileName = '';
-        
-        // Generate new keys for next share
-        await _generateMasterKey();
       }
 
     } catch (e) {
@@ -733,19 +718,8 @@ class _ShareScreenState extends State<ShareScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('❌ Share Failed'),
-                const SizedBox(height: 5),
-                Text(
-                  e.toString().replaceAll('Exception: ', ''),
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ],
-            ),
+            content: Text(e.toString().replaceAll('Exception: ', '')),
             backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
           ),
         );
       }
@@ -756,7 +730,7 @@ class _ShareScreenState extends State<ShareScreen> {
 
   Future<void> _showShareDialog(String pin, String key, dynamic expiryTime, String contentType, String contentId) async {
     String expiryText = '';
-    if (expiryTime != null) {
+    if (expiryTime != null && expiryTime != 'Not specified') {
       expiryText = '⏰ Expires: ${_formatExpiryTime(expiryTime)}';
     } else {
       expiryText = '🔒 One-time view (self-destructs after first view)';
@@ -789,29 +763,6 @@ class _ShareScreenState extends State<ShareScreen> {
             children: [
               Text('✅ $contentInfo has been encrypted and uploaded securely.'),
               const SizedBox(height: 20),
-              
-              // Content ID
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.grey[100],
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.grey[300]!),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.info, size: 16, color: Colors.blue),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Content ID: $contentId',
-                        style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 15),
               
               // PIN Card
               Card(
@@ -900,11 +851,6 @@ class _ShareScreenState extends State<ShareScreen> {
                     Text('• Content Type: ${contentType.toUpperCase()}'),
                     Text('• $expiryText'),
                     Text('• Device Limit: $_deviceLimit device${_deviceLimit > 1 ? 's' : ''}'),
-                    if (_enableDynamicPIN) Text('• 🔄 Dynamic PIN: Every $_pinRotationInterval minutes'),
-                    if (_enableAutoTerminate) const Text('• 🚨 Auto-terminate on suspicion'),
-                    if (_enableScreenshotProtection) const Text('• 📸 Screenshot protection enabled'),
-                    if (_enableWatermarking) const Text('• 💧 Invisible watermarking enabled'),
-                    if (_requireBiometric) const Text('• 👆 Biometric required'),
                     const SizedBox(height: 5),
                     const Text('⚠️ Recipient needs BOTH PIN and KEY to view content', style: TextStyle(fontSize: 11)),
                   ],
@@ -944,19 +890,12 @@ class _ShareScreenState extends State<ShareScreen> {
               final shareMessage = '''
 🔒 SECURE CONTENT SHARED
 
-Content ID: $contentId
-Content: $contentInfo
 PIN: $pin
 KEY: $key
 
 Access Mode: ${_selectedAccessMode == 'time_based' ? '⏰ Time-Based' : '🔒 One-Time View'}
 $expiryText
 Device Limit: $_deviceLimit device${_deviceLimit > 1 ? 's' : ''}
-
-🔐 SECURITY FEATURES:
-${_enableDynamicPIN ? '• Dynamic PIN: Every $_pinRotationInterval minutes\n' : ''}${_enableAutoTerminate ? '• Auto-terminate on suspicion\n' : ''}${_enableScreenshotProtection ? '• No screenshots allowed\n' : ''}${_enableWatermarking ? '• Invisible watermarking\n' : ''}${_requireBiometric ? '• Biometric required\n' : ''}• Online view only (never saved to device)
-• Auto-close if internet lost
-• Content self-destructs after limits
 
 ⚠️ IMPORTANT:
 - Save BOTH PIN and KEY
@@ -1002,19 +941,6 @@ ${_enableDynamicPIN ? '• Dynamic PIN: Every $_pinRotationInterval minutes\n' :
   }
 
   String _getMimeType(String path) {
-    final ext = path.split('.').last.toLowerCase();
-    switch (ext) {
-      case 'jpg':
-      case 'jpeg': return 'image/jpeg';
-      case 'png': return 'image/png';
-      case 'gif': return 'image/gif';
-      case 'pdf': return 'application/pdf';
-      case 'doc':
-      case 'docx': return 'application/msword';
-      case 'txt': return 'text/plain';
-      case 'mp4': return 'video/mp4';
-      case 'mp3': return 'audio/mpeg';
-      default: return 'application/octet-stream';
-    }
+    return EncryptionService.getMimeType(path);
   }
 }

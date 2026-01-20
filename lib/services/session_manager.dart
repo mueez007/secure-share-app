@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io'; // Required for Platform
+import 'package:crypto/crypto.dart'; // Required for sha256
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:package_info_plus/package_info_plus.dart';
