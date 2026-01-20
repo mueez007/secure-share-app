@@ -14,7 +14,7 @@ class ApiService {
 
   static String get baseUrl => _baseUrl;
 
-  // 1. Connection Test - FIXED SIGNATURE
+  // 1. Connection Test
   static Future<bool> testConnection() async {
     try {
       final connectivityResult = await _connectivity.checkConnectivity();
@@ -23,7 +23,7 @@ class ApiService {
       }
 
       final response = await http.get(
-        Uri.parse('$_baseUrl/'), // Your backend root endpoint
+        Uri.parse('$_baseUrl/'),
         headers: {'Accept': 'application/json'},
       ).timeout(const Duration(seconds: 3));
 
@@ -34,9 +34,9 @@ class ApiService {
     }
   }
 
-  // 2. Upload Content - FIXED to match ShareScreen call
+  // 2. Upload Content - ZERO-KNOWLEDGE VERSION
   static Future<Map<String, dynamic>> uploadContent({
-    required Uint8List encryptedBytes, // Keep this as Uint8List
+    required Uint8List encryptedBytes,
     required String iv,
     required String accessMode,
     int? durationMinutes,
@@ -50,11 +50,13 @@ class ApiService {
     bool autoTerminateOnSuspicion = true,
     bool requireBiometric = false,
     List<String>? trustedDevices,
+    // NEW: Zero-knowledge parameters
+    required String pin, // 4-digit PIN generated locally
+    required String keyHash, // Hash of encryption key
   }) async {
     try {
-      final uri = Uri.parse('$_baseUrl/content/upload'); // Fixed endpoint
+      final uri = Uri.parse('$_baseUrl/content/upload');
       
-      // Create multipart request
       var request = http.MultipartRequest('POST', uri);
       
       // Add encrypted file
@@ -64,7 +66,7 @@ class ApiService {
         filename: fileName ?? 'secure_content.dat',
       ));
       
-      // Add form fields
+      // Add form fields - ZERO-KNOWLEDGE
       request.fields['iv'] = iv;
       request.fields['access_mode'] = accessMode;
       request.fields['device_limit'] = deviceLimit.toString();
@@ -73,6 +75,11 @@ class ApiService {
       request.fields['require_biometric'] = requireBiometric.toString();
       request.fields['dynamic_pin'] = dynamicPIN.toString();
       
+      // ZERO-KNOWLEDGE CRITICAL FIELDS
+      request.fields['pin'] = pin; // Client-generated PIN
+      request.fields['key_hash'] = keyHash; // Hash of encryption key
+      
+      // Optional fields
       if (durationMinutes != null) {
         request.fields['duration_minutes'] = durationMinutes.toString();
       }
@@ -106,12 +113,13 @@ class ApiService {
     }
   }
 
-  // 3. Access Content - FIXED SIGNATURE
+  // 3. Access Content - UPDATED FOR ZERO-KNOWLEDGE
   static Future<Map<String, dynamic>> accessContent(
     String pin, {
     String? deviceId,
     String? deviceFingerprint,
     bool biometricVerified = false,
+    String? keyHash, // Optional: for key verification
   }) async {
     try {
       final url = Uri.parse('$_baseUrl/content/access/$pin');
@@ -121,6 +129,7 @@ class ApiService {
         'device_fingerprint': deviceFingerprint,
         'biometric_verified': biometricVerified,
         'platform': Platform.operatingSystem,
+        if (keyHash != null) 'key_hash': keyHash, // Include key hash for verification
       };
       
       final response = await http.post(
@@ -135,6 +144,8 @@ class ApiService {
         throw Exception('PIN not found');
       } else if (response.statusCode == 410) {
         throw Exception('Content expired or destroyed');
+      } else if (response.statusCode == 401) {
+        throw Exception('Invalid PIN or encryption key');
       } else {
         throw Exception('Access failed: ${response.statusCode}');
       }
@@ -144,7 +155,28 @@ class ApiService {
     }
   }
 
-  // 4. Report Suspicious Activity - ADDED
+  // 4. Stream Content
+  static Future<Uint8List> streamContent(String contentId, String sessionToken) async {
+    try {
+      final url = Uri.parse('$_baseUrl/content/stream/$contentId?session_token=$sessionToken');
+      
+      final response = await http.get(
+        url,
+        headers: {'Accept': 'application/octet-stream'},
+      ).timeout(const Duration(seconds: 30));
+      
+      if (response.statusCode == 200) {
+        return response.bodyBytes;
+      } else {
+        throw Exception('Stream failed: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('❌ Stream error: $e');
+      rethrow;
+    }
+  }
+
+  // 5. Report Suspicious Activity
   static Future<void> reportSuspiciousActivity({
     required String contentId,
     required String activityType,
@@ -168,6 +200,35 @@ class ApiService {
       ).timeout(const Duration(seconds: 5));
     } catch (e) {
       print('⚠️ Failed to report suspicious activity: $e');
+    }
+  }
+
+  // 6. Terminate Content
+  static Future<void> terminateContent(String contentId) async {
+    try {
+      final url = Uri.parse('$_baseUrl/content/$contentId/terminate');
+      
+      await http.post(url).timeout(const Duration(seconds: 5));
+    } catch (e) {
+      print('⚠️ Failed to terminate content: $e');
+    }
+  }
+
+  // 7. Get Content Analytics
+  static Future<Map<String, dynamic>> getContentAnalytics(String contentId) async {
+    try {
+      final url = Uri.parse('$_baseUrl/content/$contentId/analytics');
+      
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
+      
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      } else {
+        throw Exception('Failed to get analytics: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('⚠️ Failed to get analytics: $e');
+      rethrow;
     }
   }
 }

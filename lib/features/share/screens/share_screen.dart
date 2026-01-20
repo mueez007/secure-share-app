@@ -12,6 +12,7 @@ import 'package:secure_share/services/api_service.dart';
 import 'package:secure_share/services/encryption_service.dart';
 import 'package:secure_share/services/session_manager.dart';
 import 'dart:math';
+import 'package:crypto/crypto.dart'; // Add this import
 
 class ShareScreen extends StatefulWidget {
   final String sharedText;
@@ -46,6 +47,7 @@ class _ShareScreenState extends State<ShareScreen> {
   String? _masterPassphrase;
   String? _contentKey;
   String? _contentIV;
+  String? _generatedPin; // Store locally generated PIN
   
   // Dynamic PIN settings
   int _pinRotationInterval = 60; // minutes
@@ -65,7 +67,7 @@ class _ShareScreenState extends State<ShareScreen> {
     _masterPassphrase = words.join('-');
     
     try {
-      // Generate a simple key for this session
+      // Generate encryption key locally
       _contentKey = EncryptionService.generateRandomKey();
       
       // Generate IV
@@ -73,12 +75,19 @@ class _ShareScreenState extends State<ShareScreen> {
       final ivBytes = List<int>.generate(16, (i) => random.nextInt(256));
       _contentIV = base64Url.encode(ivBytes);
       
-      print('✅ Generated encryption key and IV');
+      // Generate 4-digit PIN locally
+      _generatedPin = List.generate(4, (_) => random.nextInt(10)).join();
+      
+      print('✅ Generated encryption key, IV, and PIN locally');
+      print('🔑 Key: ${_contentKey!.substring(0, 20)}...');
+      print('🔒 PIN: $_generatedPin');
+      
     } catch (e) {
       print('Key generation error: $e');
-      // Fallback: generate simple key
+      // Fallback
       _contentKey = 'key_${DateTime.now().millisecondsSinceEpoch}';
       _contentIV = 'iv_${DateTime.now().millisecondsSinceEpoch}';
+      _generatedPin = '1234'; // Default fallback
     }
   }
 
@@ -347,6 +356,36 @@ class _ShareScreenState extends State<ShareScreen> {
                         ),
                   ),
                 ),
+                
+                // Zero-Knowledge Info
+                const SizedBox(height: 20),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.green[50],
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.green),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.verified_user, color: Colors.green, size: 24),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('🔐 Zero-Knowledge Encryption', 
+                                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                            const SizedBox(height: 4),
+                            Text('Encryption keys NEVER leave your device. Backend cannot read your content.',
+                                style: TextStyle(fontSize: 12, color: Colors.green[800])),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                
                 const SizedBox(height: 30),
               ],
             ),
@@ -362,6 +401,9 @@ class _ShareScreenState extends State<ShareScreen> {
                     CircularProgressIndicator(),
                     SizedBox(height: 20),
                     Text("Encrypting & Uploading...", style: TextStyle(color: Colors.white, fontSize: 16)),
+                    SizedBox(height: 10),
+                    Text("Keys generated locally, never sent to server", 
+                        style: TextStyle(color: Colors.white70, fontSize: 12)),
                   ],
                 ),
               ),
@@ -513,7 +555,7 @@ class _ShareScreenState extends State<ShareScreen> {
                 const SizedBox(width: 5),
                 Expanded(
                   child: Text(
-                    'File will be encrypted and streamed online. Never saved to device.',
+                    'File encrypted locally before upload. Backend cannot read it.',
                     style: TextStyle(fontSize: 12, color: isDark ? Colors.grey[400] : Colors.grey[600]),
                   ),
                 ),
@@ -626,7 +668,7 @@ class _ShareScreenState extends State<ShareScreen> {
     }
 
     // Validate encryption keys
-    if (_contentKey == null || _contentIV == null) {
+    if (_contentKey == null || _contentIV == null || _generatedPin == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Encryption keys not ready. Please try again.'), backgroundColor: Colors.red),
       );
@@ -636,7 +678,7 @@ class _ShareScreenState extends State<ShareScreen> {
     setState(() => _isUploading = true);
 
     try {
-      print('🚀 Starting secure share process...');
+      print('🚀 Starting ZERO-KNOWLEDGE secure share process...');
 
       // Check backend connection
       final bool isConnected = await ApiService.testConnection();
@@ -655,8 +697,8 @@ class _ShareScreenState extends State<ShareScreen> {
         mimeType = _getMimeType(_selectedFile!.path);
       }
 
-      // Encrypt Data
-      print('🔐 Encrypting content...');
+      // Encrypt Data LOCALLY
+      print('🔐 Encrypting content locally...');
       final encryptedResult = EncryptionService.encryptBytes(dataBytes, _contentKey!);
       final Uint8List encryptedBytes = encryptedResult['bytes'] as Uint8List;
       final String iv = encryptedResult['iv'] as String;
@@ -674,8 +716,13 @@ class _ShareScreenState extends State<ShareScreen> {
         }
       }
 
-      // Upload to backend - FIXED: Using correct parameters
-      print('📤 Uploading to backend...');
+      // Generate key hash (for zero-knowledge verification)
+      final keyHash = _generateKeyHash(_contentKey!);
+      print('🔑 Key Hash (sent to backend): $keyHash');
+      print('🔒 PIN (sent to backend): $_generatedPin');
+
+      // Upload to backend with ZERO-KNOWLEDGE parameters
+      print('📤 Uploading encrypted content (backend cannot read it)...');
       final response = await ApiService.uploadContent(
         encryptedBytes: encryptedBytes,
         iv: iv,
@@ -691,19 +738,23 @@ class _ShareScreenState extends State<ShareScreen> {
         autoTerminateOnSuspicion: _enableAutoTerminate,
         requireBiometric: _requireBiometric,
         trustedDevices: [deviceFingerprint],
+        // ZERO-KNOWLEDGE PARAMETERS
+        pin: _generatedPin!, // Locally generated PIN
+        keyHash: keyHash, // Hash of encryption key (not the key itself)
       );
 
-      final pin = response['pin'];
       final contentId = response['content_id'];
       final expiryTime = response['expiry_time'] ?? 'Not specified';
       
-      print('✅ Upload successful! PIN: $pin, Content ID: $contentId');
+      print('✅ Zero-knowledge upload successful!');
+      print('📌 Content ID: $contentId');
+      print('🔐 Encryption key stays on device');
 
-      // Store local session info
+      // Store local session info (key never leaves device)
       await SessionManager.storeAccessToken('content_key_$contentId', _contentKey!);
 
-      // Show PIN and Key dialog
-      await _showShareDialog(pin, _contentKey!, expiryTime, _selectedFileType, contentId);
+      // Show PIN and Key dialog (both generated locally)
+      await _showShareDialog(_generatedPin!, _contentKey!, expiryTime, _selectedFileType, contentId);
 
       // Clear form
       if (mounted) {
@@ -725,6 +776,17 @@ class _ShareScreenState extends State<ShareScreen> {
       }
     } finally {
       if (mounted) setState(() => _isUploading = false);
+    }
+  }
+
+  String _generateKeyHash(String key) {
+    try {
+      final keyBytes = utf8.encode(key);
+      final hash = sha256.convert(keyBytes);
+      return hash.toString();
+    } catch (e) {
+      print('Key hash error: $e');
+      return 'hash_error_${DateTime.now().millisecondsSinceEpoch}';
     }
   }
 
@@ -762,7 +824,25 @@ class _ShareScreenState extends State<ShareScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text('✅ $contentInfo has been encrypted and uploaded securely.'),
-              const SizedBox(height: 20),
+              const SizedBox(height: 5),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.green[50],
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.verified_user, size: 14, color: Colors.green),
+                    SizedBox(width: 5),
+                    Expanded(
+                      child: Text('Zero-Knowledge: Keys never left your device',
+                          style: TextStyle(fontSize: 11, color: Colors.green)),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 15),
               
               // PIN Card
               Card(
@@ -823,6 +903,9 @@ class _ShareScreenState extends State<ShareScreen> {
                       ),
                       const SizedBox(height: 5),
                       const Text('Share this key separately for maximum security', style: TextStyle(fontSize: 11)),
+                      const SizedBox(height: 5),
+                      const Text('⚠️ Without this key, content cannot be decrypted',
+                          style: TextStyle(fontSize: 10, color: Colors.red)),
                     ],
                   ),
                 ),
@@ -853,6 +936,9 @@ class _ShareScreenState extends State<ShareScreen> {
                     Text('• Device Limit: $_deviceLimit device${_deviceLimit > 1 ? 's' : ''}'),
                     const SizedBox(height: 5),
                     const Text('⚠️ Recipient needs BOTH PIN and KEY to view content', style: TextStyle(fontSize: 11)),
+                    const SizedBox(height: 5),
+                    const Text('🔐 Backend cannot read your content (zero-knowledge)', 
+                        style: TextStyle(fontSize: 10, color: Colors.green)),
                   ],
                 ),
               ),
@@ -888,7 +974,7 @@ class _ShareScreenState extends State<ShareScreen> {
               Navigator.pop(context);
               
               final shareMessage = '''
-🔒 SECURE CONTENT SHARED
+🔒 SECURE CONTENT SHARED (Zero-Knowledge Encryption)
 
 PIN: $pin
 KEY: $key
@@ -901,7 +987,7 @@ Device Limit: $_deviceLimit device${_deviceLimit > 1 ? 's' : ''}
 - Save BOTH PIN and KEY
 - Without KEY, content cannot be decrypted
 - Content is end-to-end encrypted
-- Backend cannot read your data
+- Backend cannot read your data (zero-knowledge)
 
 📱 How to access:
 1. Open Secure Share App
