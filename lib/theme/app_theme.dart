@@ -27,7 +27,7 @@ class AppTheme {
         fontWeight: FontWeight.w600,
       ),
     ),
-    cardTheme: CardTheme(
+    cardTheme: CardThemeData(
       color: AppColors.lightCard, // REMOVE THE "t" AFTER THE COMMA
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
@@ -98,7 +98,7 @@ class AppTheme {
         fontWeight: FontWeight.w600,
       ),
     ),
-    cardTheme: CardTheme(
+    cardTheme: CardThemeData(
       color: AppColors.darkCard,
       elevation: 2,
       shape: RoundedRectangleBorder(
