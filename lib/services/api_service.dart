@@ -166,7 +166,11 @@ class ApiService {
               ? int.tryParse(responseData['current_devices'].toString()) ?? 0
               : 0,
           'access_mode': responseData['access_mode']?.toString() ?? 'time_based',
-          'expiry_time': responseData['expiry_time']?.toString(),
+          'expiry_time': responseData['expiry_time'] != null && 
+                         responseData['expiry_time'] != 'None' && 
+                         responseData['expiry_time'] != 'null' 
+                         ? responseData['expiry_time'].toString() 
+                         : null,
           'content_type': responseData['content_type']?.toString() ?? 'text',
           'file_name': responseData['file_name']?.toString() ?? 'secure_content',
           'file_size': responseData['file_size'] != null

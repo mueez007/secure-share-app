@@ -1316,9 +1316,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
     });
 
     try {
-      // Get device info for tracking
-      final deviceInfo = await SessionManager.getDeviceInfo();
-      final deviceFingerprint = await SessionManager.getDeviceFingerprint();
+        // Get consistent device fingerprint (without timestamp)
+        final deviceInfo = await SessionManager.getDeviceInfo();
+        final deviceFingerprint = deviceInfo['device_id']?.toString() ?? 
+                                'device_${DateTime.now().millisecondsSinceEpoch}';
       
       // Access content
       final response = await ApiService.accessContent(
@@ -1361,11 +1362,27 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         throw Exception('Invalid response from server - missing encryption data');
       }
 
-      // For now, just store the URL for streaming
-      // In a real implementation, you would stream and decrypt the content
-      _decryptedContent = 'Content loaded securely from: $encryptedContent\n\n'
-                         'This content is encrypted and will be decrypted in the secure viewer.\n'
-                         'IV: ${iv.substring(0, 16)}...';
+      // Store content for secure viewer
+      if (encryptedContent.startsWith('http')) {
+        // It's a URL for streaming
+        _decryptedContent = '🔒 Secure Content Ready for Streaming\n\n'
+                           'Content will be securely streamed and decrypted in the protected viewer.\n'
+                           'File: $_fileName\n'
+                           'Type: ${_contentType.toUpperCase()}';
+      } else if (encryptedContent.isNotEmpty && !encryptedContent.startsWith('http')) {
+        // It's encrypted text content
+        try {
+          _decryptedContent = EncryptionService.decryptData(encryptedContent, iv, key);
+        } catch (e) {
+          print('❌ Direct decryption failed: $e');
+          _decryptedContent = '🔐 Encrypted Content\n\n'
+                             'Content loaded. Use secure viewer to access.\n'
+                             'Decryption will happen in secure viewer.';
+        }
+      } else {
+        _decryptedContent = '🔒 Secure Content\n\n'
+                           'Ready to view in secure protected viewer.';
+      }
 
       // Start security timers
       if (_accessMode == 'time_based' && expiryTime != null) {

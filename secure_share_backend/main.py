@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timedelta
 import os
 from pathlib import Path
-
+from utils import TimeUtils  # Add this line
 # Import your modules
 from config import settings
 from database import get_db, init_db
@@ -213,6 +213,11 @@ async def access_content(
         # Check content status
         if content.status != "active":
             raise HTTPException(status_code=410, detail=f"Content is {content.status}")
+        # Handle one-time view
+        if content.access_mode == "one_time" and content.views_count > 0:
+            content.status = "viewed"
+            db.commit()
+            raise HTTPException(status_code=410, detail="Content already viewed (one-time view)")
         
         # Check if expired
         if content.expires_at and datetime.utcnow() > content.expires_at:
@@ -246,7 +251,8 @@ async def access_content(
                 device_fingerprint=device_fingerprint,
                 session_token=session_token,
                 ip_address=device_info.get("ip_address"),
-                user_agent=device_info.get("user_agent")
+                user_agent=device_info.get("user_agent"),
+                view_count=0  # Initialize to 0
             )
             db.add(session)
             
@@ -264,9 +270,9 @@ async def access_content(
         if content.require_biometric and not device_info.get("biometric_verified", False):
             raise HTTPException(status_code=403, detail="Biometric verification required")
         
-        # Increment view count
-        content.views_count = content.views_count + 1
-        session.view_count = session.view_count + 1
+              # Increment view count with null safety
+        content.views_count = (content.views_count or 0) + 1
+        session.view_count = (session.view_count or 0) + 1
         
         # Reset PIN failed attempts on successful access
         pin_record.failed_attempts = 0
@@ -291,6 +297,7 @@ async def access_content(
             "mime_type": content.mime_type,
             "access_mode": content.access_mode,
             "expiry_time": content.expires_at.isoformat() if content.expires_at else None,
+            "remaining_time_seconds": TimeUtils.seconds_until(content.expires_at) if content.expires_at else 0,
             "views_remaining": views_remaining,
             "device_limit": content.max_devices,
             "current_devices": content.current_devices,
