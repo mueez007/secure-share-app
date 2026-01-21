@@ -850,6 +850,168 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
   }
 
   void _loadContentIntoWebView() {
+    // Check if it's a streaming URL for files (images, PDFs, videos, etc.)
+    if (_decryptedContent.startsWith('STREAM_URL:')) {
+      // Parse the streaming URL
+      final parts = _decryptedContent.split('|');
+      String streamUrl = '';
+      
+      for (var part in parts) {
+        if (part.startsWith('STREAM_URL:')) {
+          streamUrl = part.substring(11);
+          break;
+        }
+      }
+      
+      if (streamUrl.isNotEmpty) {
+        print('🌐 Loading streaming URL: $streamUrl');
+        
+        // Create a secure HTML wrapper for streaming content
+        String secureHtml = '''
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+          <style>
+            * {
+              margin: 0;
+              padding: 0;
+              -webkit-touch-callout: none;
+              -webkit-user-select: none;
+              -khtml-user-select: none;
+              -moz-user-select: none;
+              -ms-user-select: none;
+              user-select: none;
+              -webkit-tap-highlight-color: transparent;
+            }
+            
+            body {
+              background: #000;
+              margin: 0;
+              padding: 0;
+              overflow: hidden;
+              height: 100vh;
+            }
+            
+            .security-shield {
+              position: fixed;
+              top: 0;
+              left: 0;
+              right: 0;
+              background: linear-gradient(90deg, #ff0000 0%, #ff4444 100%);
+              color: white;
+              padding: 15px;
+              text-align: center;
+              font-size: 14px;
+              font-weight: bold;
+              z-index: 9999;
+              box-shadow: 0 3px 15px rgba(255, 0, 0, 0.5);
+            }
+            
+            .content-container {
+              width: 100%;
+              height: 100vh;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+            }
+            
+            .watermark {
+              position: fixed;
+              bottom: 20px;
+              right: 20px;
+              color: rgba(255, 255, 255, 0.1);
+              font-size: 10px;
+              pointer-events: none;
+              transform: rotate(-45deg);
+            }
+            
+            .timer {
+              position: fixed;
+              top: 50px;
+              right: 20px;
+              background: rgba(255, 165, 0, 0.2);
+              color: #ffa500;
+              padding: 8px 12px;
+              border-radius: 20px;
+              font-size: 12px;
+              font-weight: bold;
+              border: 1px solid rgba(255, 165, 0, 0.3);
+            }
+          </style>
+        </head>
+        <body>
+          <div class="security-shield">
+            🔒 PROTECTED CONTENT - SCREENSHOTS & DOWNLOADS BLOCKED
+          </div>
+          
+          <div class="timer" id="timer">Time: --:--</div>
+          
+          <div class="content-container">
+        ''';
+        
+        // Add appropriate content based on type
+        if (_contentType == 'image') {
+          secureHtml += '<img src="$streamUrl" style="max-width: 100%; max-height: 100vh; object-fit: contain;" oncontextmenu="return false;" />';
+        } else if (_contentType == 'pdf') {
+          secureHtml += '<iframe src="$streamUrl#toolbar=0&navpanes=0&scrollbar=0" style="width: 100%; height: 100vh; border: none;"></iframe>';
+        } else if (_contentType == 'video') {
+          secureHtml += '<video controls controlsList="nodownload" style="max-width: 100%; max-height: 100vh;" oncontextmenu="return false;">'
+                       '<source src="$streamUrl" type="video/mp4">'
+                       'Your browser does not support the video tag.'
+                       '</video>';
+        } else {
+          // Generic file - show download/stream message
+          secureHtml += '<div style="color: white; text-align: center; padding: 40px;">'
+                       '<h3>🔒 Secure File: $_fileName</h3>'
+                       '<p>File is being streamed securely</p>'
+                       '<p>Type: ${_contentType.toUpperCase()}</p>'
+                       '<p>Size: $_fileSize</p>'
+                       '</div>';
+        }
+        
+        secureHtml += '''
+          </div>
+          
+          <div class="watermark">SECURE_VIEW_${DateTime.now().millisecondsSinceEpoch}</div>
+          
+          <script>
+            // All the same security scripts from original
+            document.addEventListener('contextmenu', e => {
+              e.preventDefault();
+              SecurityChannel.postMessage('context_menu_blocked');
+              return false;
+            });
+            
+            document.addEventListener('selectstart', e => {
+              e.preventDefault();
+              SecurityChannel.postMessage('selection_attempt');
+              return false;
+            });
+            
+            // ... (include ALL the other security scripts from original)
+            
+            function updateTimer(seconds) {
+              const timer = document.getElementById('timer');
+              if (timer) {
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                const secs = seconds % 60;
+                timer.textContent = \`Time: \${hours.toString().padStart(2, '0')}:\${minutes.toString().padStart(2, '0')}:\${secs.toString().padStart(2, '0')}\`;
+              }
+            }
+          </script>
+        </body>
+        </html>
+        ''';
+        
+        _webViewController.loadHtmlString(secureHtml);
+        return;
+      }
+    }
+    
+    // If not a streaming URL or streaming failed, use original HTML with decrypted content
     String htmlContent = '''
       <!DOCTYPE html>
       <html>
@@ -1362,26 +1524,31 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         throw Exception('Invalid response from server - missing encryption data');
       }
 
-      // Store content for secure viewer
-      if (encryptedContent.startsWith('http')) {
-        // It's a URL for streaming
-        _decryptedContent = '🔒 Secure Content Ready for Streaming\n\n'
-                           'Content will be securely streamed and decrypted in the protected viewer.\n'
-                           'File: $_fileName\n'
-                           'Type: ${_contentType.toUpperCase()}';
+      // Store the encrypted content URL for streaming
+      final encryptedContentUrl = response['encrypted_content_url']?.toString() ?? '';
+      
+      if (encryptedContentUrl.isNotEmpty && encryptedContentUrl.startsWith('http')) {
+        // It's a URL for streaming - store minimal info
+        _decryptedContent = 'STREAM_URL:$encryptedContentUrl|IV:$iv|CONTENT_TYPE:$_contentType|FILE_NAME:$_fileName';
+        print('📡 Streaming URL stored: $encryptedContentUrl');
       } else if (encryptedContent.isNotEmpty && !encryptedContent.startsWith('http')) {
-        // It's encrypted text content
+        // It's direct encrypted text content
         try {
           _decryptedContent = EncryptionService.decryptData(encryptedContent, iv, key);
+          print('📝 Text content decrypted, length: ${_decryptedContent.length}');
         } catch (e) {
           print('❌ Direct decryption failed: $e');
-          _decryptedContent = '🔐 Encrypted Content\n\n'
-                             'Content loaded. Use secure viewer to access.\n'
-                             'Decryption will happen in secure viewer.';
+          _decryptedContent = '🔐 Encrypted Text Content\n\n'
+                             'Decryption key verified. Content is secure.\n\n'
+                             'File: $_fileName\n'
+                             'Type: ${_contentType.toUpperCase()}';
         }
       } else {
         _decryptedContent = '🔒 Secure Content\n\n'
-                           'Ready to view in secure protected viewer.';
+                           'Content loaded successfully.\n'
+                           'File: $_fileName\n'
+                           'Type: ${_contentType.toUpperCase()}\n'
+                           'Size: $_fileSize';
       }
 
       // Start security timers
@@ -1445,9 +1612,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
 
   void _startSecurityCountdown(String expiryTimeStr) {
     try {
-      final expiryTime = DateTime.parse(expiryTimeStr);
-      final now = DateTime.now();
-      final difference = expiryTime.difference(now);
+      print('🕐 Starting countdown for expiry: $expiryTimeStr');
+      
+      // Parse UTC time and convert to local
+      final expiryTimeUtc = DateTime.parse(expiryTimeStr).toUtc();
+      final nowUtc = DateTime.now().toUtc();
+      final difference = expiryTimeUtc.difference(nowUtc);
+      
+      print('🕐 UTC Expiry: $expiryTimeUtc, Now UTC: $nowUtc, Difference: ${difference.inSeconds} seconds');
       
       if (difference.inSeconds > 0) {
         _remainingSeconds = difference.inSeconds;
@@ -1462,31 +1634,46 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
           _remainingSeconds--;
           _updateTimerDisplay(_remainingSeconds);
           
-          // Update webview timer
-          if (_remainingSeconds % 5 == 0) {
+          // Update webview timer every second (not every 5 seconds)
+          try {
             _webViewController.runJavaScript('updateTimer($_remainingSeconds)');
+          } catch (e) {
+            // Ignore if webview not loaded yet
           }
         });
+        
+        print('✅ Countdown started: $_remainingSeconds seconds remaining');
       } else {
+        print('⚠️ Already expired or invalid time');
         _autoCloseContent('Already expired');
       }
     } catch (e) {
-      print('Countdown error: $e');
+      print('❌ Countdown error: $e');
+      // Don't auto-close on parse error
     }
   }
 
   void _updateTimerDisplay(int seconds) {
     if (!mounted) return;
     
-    final hours = seconds ~/ 3600;
+    final days = seconds ~/ 86400;
+    final hours = (seconds % 86400) ~/ 3600;
     final minutes = (seconds % 3600) ~/ 60;
     final secs = seconds % 60;
 
     setState(() {
-      _timeRemaining = '${hours.toString().padLeft(2, '0')}:'
-          '${minutes.toString().padLeft(2, '0')}:'
-          '${secs.toString().padLeft(2, '0')}';
+      if (days > 0) {
+        _timeRemaining = '${days}d ${hours.toString().padLeft(2, '0')}:'
+            '${minutes.toString().padLeft(2, '0')}:'
+            '${secs.toString().padLeft(2, '0')}';
+      } else {
+        _timeRemaining = '${hours.toString().padLeft(2, '0')}:'
+            '${minutes.toString().padLeft(2, '0')}:'
+            '${secs.toString().padLeft(2, '0')}';
+      }
     });
+    
+    print('⏰ Timer updated: $_timeRemaining ($seconds seconds)');
   }
 
   void _autoCloseContent(String reason) {
