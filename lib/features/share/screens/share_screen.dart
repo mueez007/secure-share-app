@@ -188,13 +188,19 @@ class _ShareScreenState extends State<ShareScreen> {
                           const Divider(),
                           const SizedBox(height: 10),
                           const Text('Duration', style: TextStyle(fontWeight: FontWeight.bold)),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            children: [
-                              _buildTimeUnitButton('Minutes', _selectedTimeUnit == 'minutes'),
-                              _buildTimeUnitButton('Hours', _selectedTimeUnit == 'hours'),
-                              _buildTimeUnitButton('Days', _selectedTimeUnit == 'days'),
-                            ],
+                          // FIXED: Line 814 - Wrap Row with Expanded or ConstrainedBox
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              maxWidth: 400, // Add max width constraint
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                _buildTimeUnitButton('Minutes', _selectedTimeUnit == 'minutes'),
+                                _buildTimeUnitButton('Hours', _selectedTimeUnit == 'hours'),
+                                _buildTimeUnitButton('Days', _selectedTimeUnit == 'days'),
+                              ],
+                            ),
                           ),
                           const SizedBox(height: 20),
                           Row(

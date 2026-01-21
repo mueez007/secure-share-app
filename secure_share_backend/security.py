@@ -3,14 +3,10 @@ import secrets
 import string
 from datetime import datetime, timedelta
 from typing import Optional
-import jwt
-from passlib.context import CryptContext
+import json  # ADD THIS
 from cryptography.fernet import Fernet
 import base64
-import os
-from config import settings
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from config import settings  # ADD THIS
 
 class SecurityUtils:
     @staticmethod
@@ -51,15 +47,20 @@ class SecurityUtils:
     
     @staticmethod
     def encrypt_key_for_storage(key: str) -> str:
-        """Encrypt content key for storage (not used in zero-knowledge, but for PIN encryption)"""
-        fernet_key = base64.urlsafe_b64encode(hashlib.sha256(settings.SECRET_KEY.encode()).digest()[:32])
+        """Encrypt content key for storage"""
+        # Use settings.SECRET_KEY from config
+        fernet_key = base64.urlsafe_b64encode(
+            hashlib.sha256(settings.SECRET_KEY.encode()).digest()[:32]
+        )
         cipher = Fernet(fernet_key)
         return cipher.encrypt(key.encode()).decode()
     
     @staticmethod
     def decrypt_key_from_storage(encrypted_key: str) -> str:
         """Decrypt content key from storage"""
-        fernet_key = base64.urlsafe_b64encode(hashlib.sha256(settings.SECRET_KEY.encode()).digest()[:32])
+        fernet_key = base64.urlsafe_b64encode(
+            hashlib.sha256(settings.SECRET_KEY.encode()).digest()[:32]
+        )
         cipher = Fernet(fernet_key)
         return cipher.decrypt(encrypted_key.encode()).decode()
     

@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
 
 class ApiService {
-  static String _baseUrl = Platform.isAndroid ? 'http://10.0.2.2:8000' : 'http://localhost:8000';
+  static String _baseUrl = Platform.isAndroid ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
   static final Connectivity _connectivity = Connectivity();
 
   static void setBaseUrl(String url) {
@@ -113,7 +113,7 @@ class ApiService {
     }
   }
 
-  // 3. Access Content - UPDATED FOR ZERO-KNOWLEDGE
+  // 3. Access Content - UPDATED WITH NULL SAFETY AND BETTER ERROR HANDLING
   static Future<Map<String, dynamic>> accessContent(
     String pin, {
     String? deviceId,
@@ -126,11 +126,15 @@ class ApiService {
       
       final body = {
         'device_id': deviceId ?? 'unknown_device',
-        'device_fingerprint': deviceFingerprint,
+        'device_fingerprint': deviceFingerprint ?? 'unknown_fingerprint',
         'biometric_verified': biometricVerified,
         'platform': Platform.operatingSystem,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
         if (keyHash != null) 'key_hash': keyHash, // Include key hash for verification
       };
+      
+      print('🔑 Sending access request to: $url');
+      print('📱 Device info: ${body['device_id']}, ${body['device_fingerprint']}');
       
       final response = await http.post(
         url,
@@ -138,16 +142,64 @@ class ApiService {
         body: jsonEncode(body),
       ).timeout(const Duration(seconds: 15));
       
+      // Debug log
+      print('🔑 Access Response Status: ${response.statusCode}');
+      print('🔑 Access Response Body: ${response.body.length > 200 ? response.body.substring(0, 200) + '...' : response.body}');
+      
+      final responseData = jsonDecode(response.body);
+      
       if (response.statusCode == 200) {
-        return jsonDecode(response.body);
+        // Ensure all required fields exist with null safety
+        final result = {
+          'encrypted_content_url': responseData['encrypted_content_url'] ?? '',
+          'encrypted_content': responseData['encrypted_content'] ?? '',
+          'content': responseData['content'] ?? '',
+          'iv': responseData['iv']?.toString() ?? '',
+          'content_id': responseData['content_id']?.toString() ?? '',
+          'views_remaining': responseData['views_remaining'] != null 
+              ? int.tryParse(responseData['views_remaining'].toString()) ?? 1 
+              : 1,
+          'device_limit': responseData['device_limit'] != null
+              ? int.tryParse(responseData['device_limit'].toString()) ?? 1
+              : 1,
+          'current_devices': responseData['current_devices'] != null
+              ? int.tryParse(responseData['current_devices'].toString()) ?? 0
+              : 0,
+          'access_mode': responseData['access_mode']?.toString() ?? 'time_based',
+          'expiry_time': responseData['expiry_time']?.toString(),
+          'content_type': responseData['content_type']?.toString() ?? 'text',
+          'file_name': responseData['file_name']?.toString() ?? 'secure_content',
+          'file_size': responseData['file_size'] != null
+              ? int.tryParse(responseData['file_size'].toString()) ?? 0
+              : 0,
+          'mime_type': responseData['mime_type']?.toString() ?? 'application/octet-stream',
+          'session_token': responseData['session_token']?.toString() ?? '',
+          'access_granted': responseData['access_granted'] ?? true,
+          'current_views': responseData['current_views'] != null
+              ? int.tryParse(responseData['current_views'].toString()) ?? 0
+              : 0,
+          'success': true,
+        };
+        
+        print('✅ Access successful. Device limit: ${result['device_limit']}, Current devices: ${result['current_devices']}');
+        return result;
       } else if (response.statusCode == 404) {
-        throw Exception('PIN not found');
+        throw Exception('PIN not found or invalid');
       } else if (response.statusCode == 410) {
         throw Exception('Content expired or destroyed');
       } else if (response.statusCode == 401) {
         throw Exception('Invalid PIN or encryption key');
+      } else if (response.statusCode == 403) {
+        throw Exception('Device limit reached');
+      } else if (response.statusCode == 423) {
+        throw Exception('PIN locked due to too many attempts');
       } else {
-        throw Exception('Access failed: ${response.statusCode}');
+        // Include server error message if available
+        final errorMsg = responseData['detail'] ?? 
+                        responseData['error'] ?? 
+                        responseData['message'] ??
+                        'Access failed: ${response.statusCode}';
+        throw Exception(errorMsg.toString());
       }
     } catch (e) {
       print('❌ Access error: $e');
@@ -160,14 +212,18 @@ class ApiService {
     try {
       final url = Uri.parse('$_baseUrl/content/stream/$contentId?session_token=$sessionToken');
       
+      print('📥 Streaming content: $contentId');
+      
       final response = await http.get(
         url,
         headers: {'Accept': 'application/octet-stream'},
       ).timeout(const Duration(seconds: 30));
       
       if (response.statusCode == 200) {
+        print('✅ Stream successful, bytes: ${response.bodyBytes.length}');
         return response.bodyBytes;
       } else {
+        print('❌ Stream failed: ${response.statusCode}');
         throw Exception('Stream failed: ${response.statusCode}');
       }
     } catch (e) {
@@ -198,6 +254,8 @@ class ApiService {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(body),
       ).timeout(const Duration(seconds: 5));
+      
+      print('🚨 Reported suspicious activity: $activityType for content $contentId');
     } catch (e) {
       print('⚠️ Failed to report suspicious activity: $e');
     }
@@ -209,6 +267,8 @@ class ApiService {
       final url = Uri.parse('$_baseUrl/content/$contentId/terminate');
       
       await http.post(url).timeout(const Duration(seconds: 5));
+      
+      print('🗑️ Terminated content: $contentId');
     } catch (e) {
       print('⚠️ Failed to terminate content: $e');
     }
@@ -228,6 +288,24 @@ class ApiService {
       }
     } catch (e) {
       print('⚠️ Failed to get analytics: $e');
+      rethrow;
+    }
+  }
+
+  // 8. Check Content Status
+  static Future<Map<String, dynamic>> checkContentStatus(String contentId) async {
+    try {
+      final url = Uri.parse('$_baseUrl/content/$contentId/status');
+      
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
+      
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      } else {
+        throw Exception('Failed to check status: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('⚠️ Failed to check content status: $e');
       rethrow;
     }
   }

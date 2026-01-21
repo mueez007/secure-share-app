@@ -24,7 +24,7 @@ class Content(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True))
     max_devices = Column(Integer, default=1)
-    current_devices = Column(Integer, default=0)
+    current_devices = Column(Integer, default=0, nullable=False)  # FIXED: added nullable=False
     
     # Security settings
     dynamic_pin = Column(Boolean, default=False)
@@ -36,7 +36,7 @@ class Content(Base):
     
     # Status
     status = Column(String, default="active")  # active, paused, terminated, expired
-    views_count = Column(Integer, default=0)
+    views_count = Column(Integer, default=0, nullable=False)  # FIXED: added nullable=False
     
     # Relationships
     pins = relationship("PIN", back_populates="content", cascade="all, delete-orphan")
@@ -55,8 +55,8 @@ class Content(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "max_devices": self.max_devices,
-            "current_devices": self.current_devices,
-            "views_count": self.views_count,
+            "current_devices": self.current_devices or 0,
+            "views_count": self.views_count or 0,
             "status": self.status,
             "dynamic_pin": self.dynamic_pin,
             "auto_terminate": self.auto_terminate,
@@ -101,7 +101,7 @@ class AccessSession(Base):
     # Session info
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     last_activity = Column(DateTime(timezone=True), server_default=func.now())
-    view_count = Column(Integer, default=0)
+    view_count = Column(Integer, default=0, nullable=False)  # FIXED: added nullable=False
     is_active = Column(Boolean, default=True)
     
     # Security
@@ -148,4 +148,4 @@ class DestructionCertificate(Base):
     destroyed_at = Column(DateTime(timezone=True), server_default=func.now())
     proof_hash = Column(String, nullable=False)
     signature = Column(String, nullable=False)
-    metadata = Column(JSON, nullable=True)
+    content_metadata = Column(JSON, nullable=True)  # FIXED: changed from 'metadata'

@@ -1,5 +1,11 @@
-import requests
+from fastapi import FastAPI
 
-response = requests.get('http://localhost:8000/')
-print(f"Status: {response.status_code}")
-print(f"Response: {response.json()}")
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"message": "Test server working!"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)

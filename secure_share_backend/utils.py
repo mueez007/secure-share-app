@@ -1,24 +1,25 @@
 import json
-import random
-import string
-from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
-from fastapi import UploadFile
-import aiofiles
 import os
 from pathlib import Path
-from config import settings
+from typing import Optional
+from datetime import datetime
+import aiofiles
+from fastapi import UploadFile
 
 class FileUtils:
     @staticmethod
     async def save_uploaded_file(upload_file: UploadFile, content_id: str) -> str:
-        """Save uploaded file to local storage (replace with cloud storage in production)"""
+        """Save uploaded file to local storage"""
         # Create uploads directory if it doesn't exist
         upload_dir = Path("uploads")
         upload_dir.mkdir(exist_ok=True)
         
         # Generate filename
-        file_ext = upload_file.filename.split('.')[-1] if '.' in upload_file.filename else 'dat'
+        if upload_file.filename and '.' in upload_file.filename:
+            file_ext = upload_file.filename.split('.')[-1]
+        else:
+            file_ext = 'dat'
+        
         filename = f"{content_id}.{file_ext}"
         file_path = upload_dir / filename
         
@@ -32,9 +33,9 @@ class FileUtils:
     
     @staticmethod
     def get_file_url(file_path: str) -> str:
-        """Get file URL for access"""
-        # In production, this would return cloud storage URL
-        return f"http://localhost:8000{file_path}"
+        """Get file URL for access - FIXED for macOS"""
+        # Use 127.0.0.1 instead of localhost for better compatibility
+        return f"http://127.0.0.1:8000{file_path}"
     
     @staticmethod
     def delete_file(file_path: str):
@@ -47,8 +48,9 @@ class FileUtils:
             path = Path(file_path)
             if path.exists():
                 path.unlink()
+                print(f"🗑️ Deleted file: {file_path}")
         except Exception as e:
-            print(f"Error deleting file {file_path}: {e}")
+            print(f"⚠️ Error deleting file {file_path}: {e}")
 
 class ContentUtils:
     @staticmethod
@@ -60,6 +62,9 @@ class ContentUtils:
     @staticmethod
     def format_file_size(size_bytes: int) -> str:
         """Format file size for display"""
+        if size_bytes is None:
+            return "0 B"
+        
         if size_bytes < 1024:
             return f"{size_bytes} B"
         elif size_bytes < 1024 * 1024:
@@ -84,8 +89,29 @@ class ContentUtils:
             'audio/wav': 'audio',
             'application/msword': 'document',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'document',
+            'application/octet-stream': 'document',
         }
         return mime_to_type.get(mime_type, 'document')
+    
+    @staticmethod
+    def get_mime_type(filename: str) -> str:
+        """Get MIME type from filename"""
+        ext = filename.split('.')[-1].lower() if '.' in filename else ''
+        mime_map = {
+            'txt': 'text/plain',
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'png': 'image/png',
+            'gif': 'image/gif',
+            'pdf': 'application/pdf',
+            'mp4': 'video/mp4',
+            'mov': 'video/quicktime',
+            'mp3': 'audio/mpeg',
+            'wav': 'audio/wav',
+            'doc': 'application/msword',
+            'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }
+        return mime_map.get(ext, 'application/octet-stream')
 
 class TimeUtils:
     @staticmethod
@@ -115,3 +141,16 @@ class TimeUtils:
             days = total_seconds // 86400
             hours = (total_seconds % 86400) // 3600
             return f"{days}d {hours}h"
+    
+    @staticmethod
+    def seconds_until(expiry_time: Optional[datetime]) -> int:
+        """Get seconds until expiry"""
+        if not expiry_time:
+            return 0
+        
+        now = datetime.utcnow()
+        if now > expiry_time:
+            return 0
+        
+        delta = expiry_time - now
+        return int(delta.total_seconds())
