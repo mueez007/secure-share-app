@@ -1493,12 +1493,12 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
       // Debug log
       print('🔑 API Response: $response');
 
-      // Extract response with null safety
-      final encryptedContent = response['encrypted_content_url'] ?? 
-                              response['encrypted_content'] ?? 
-                              response['content'] ?? 
+            // Extract response with null safety
+      final encryptedContent = response['encrypted_content']?.toString() ?? 
+                              response['content']?.toString() ?? 
                               '';
-      final iv = response['iv'] ?? '';
+      final encryptedContentUrl = response['encrypted_content_url']?.toString() ?? ''; // DECLARE IT HERE
+      final iv = response['iv']?.toString() ?? '';
       _contentId = response['content_id']?.toString() ?? '';
       _viewsRemaining = int.tryParse(response['views_remaining']?.toString() ?? '1') ?? 1;
       _deviceLimit = int.tryParse(response['device_limit']?.toString() ?? '1') ?? 1;
@@ -1513,42 +1513,63 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
 
       // Debug device limit check
       print('🔍 Device limit check: views_remaining=$_viewsRemaining, device_limit=$_deviceLimit, current_devices=$_currentDevices');
+      print('📦 Content info: type=$_contentType, encrypted=${encryptedContent.isNotEmpty}, url=${encryptedContentUrl.isNotEmpty}');
 
       // Check access limits - FIXED LOGIC
       if (_viewsRemaining < 0) {
         throw Exception('Device limit reached');
       }
 
-      // Additional check for null encrypted content
-      if (encryptedContent.isEmpty || iv.isEmpty) {
+      // Additional check - need either encrypted content OR URL
+      if (encryptedContent.isEmpty && encryptedContentUrl.isEmpty) {
         throw Exception('Invalid response from server - missing encryption data');
       }
+      if (iv.isEmpty) {
+        throw Exception('Invalid response from server - missing IV');
+      }
 
-      // Store the encrypted content URL for streaming
-      final encryptedContentUrl = response['encrypted_content_url']?.toString() ?? '';
-      
-      if (encryptedContentUrl.isNotEmpty && encryptedContentUrl.startsWith('http')) {
-        // It's a URL for streaming - store minimal info
-        _decryptedContent = 'STREAM_URL:$encryptedContentUrl|IV:$iv|CONTENT_TYPE:$_contentType|FILE_NAME:$_fileName';
-        print('📡 Streaming URL stored: $encryptedContentUrl');
-      } else if (encryptedContent.isNotEmpty && !encryptedContent.startsWith('http')) {
-        // It's direct encrypted text content
-        try {
-          _decryptedContent = EncryptionService.decryptData(encryptedContent, iv, key);
-          print('📝 Text content decrypted, length: ${_decryptedContent.length}');
-        } catch (e) {
-          print('❌ Direct decryption failed: $e');
-          _decryptedContent = '🔐 Encrypted Text Content\n\n'
-                             'Decryption key verified. Content is secure.\n\n'
+      // For TEXT content, decrypt and show directly
+      // For other types (images, PDFs, etc.), use streaming
+      if (_contentType == 'text') {
+        // TEXT content - should be encrypted text in response
+        print('📝 Processing TEXT content');
+        print('📄 Encrypted content length: ${encryptedContent.length}');
+        print('🔗 Encrypted URL: $encryptedContentUrl');
+        
+        if (encryptedContent.isNotEmpty && !encryptedContent.startsWith('http')) {
+          try {
+            _decryptedContent = EncryptionService.decryptData(encryptedContent, iv, key);
+            print('✅ Text decrypted successfully, length: ${_decryptedContent.length} chars');
+          } catch (e) {
+            print('❌ Text decryption failed: $e');
+            _decryptedContent = '🔐 DECRYPTION ERROR\n\n'
+                               'Could not decrypt text content.\n'
+                               'Please check your encryption key.\n\n'
+                               'Error: $e';
+          }
+        } else if (encryptedContentUrl.isNotEmpty && encryptedContentUrl.startsWith('http')) {
+          // Text content is being streamed (wrong - but handle it)
+          print('⚠️ Text content has streaming URL (unexpected): $encryptedContentUrl');
+          _decryptedContent = 'STREAM_URL:$encryptedContentUrl|IV:$iv|CONTENT_TYPE:$_contentType|FILE_NAME:$_fileName';
+        } else {
+          _decryptedContent = '📄 Text Content\n\n'
+                             'Content loaded successfully.\n'
+                             'Use secure viewer to read.\n\n'
                              'File: $_fileName\n'
-                             'Type: ${_contentType.toUpperCase()}';
+                             'Size: $_fileSize';
         }
       } else {
-        _decryptedContent = '🔒 Secure Content\n\n'
-                           'Content loaded successfully.\n'
-                           'File: $_fileName\n'
-                           'Type: ${_contentType.toUpperCase()}\n'
-                           'Size: $_fileSize';
+        // Non-text content (images, PDFs, videos) - use streaming
+        
+        if (encryptedContentUrl.isNotEmpty && encryptedContentUrl.startsWith('http')) {
+          _decryptedContent = 'STREAM_URL:$encryptedContentUrl|IV:$iv|CONTENT_TYPE:$_contentType|FILE_NAME:$_fileName';
+          print('📡 Streaming URL for $_contentType: $encryptedContentUrl');
+        } else {
+          _decryptedContent = '📁 File: $_fileName\n\n'
+                             'Type: ${_contentType.toUpperCase()}\n'
+                             'Size: $_fileSize\n\n'
+                             'Ready to view in secure viewer.';
+        }
       }
 
       // Start security timers
