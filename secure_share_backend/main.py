@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timedelta
 import os
 from pathlib import Path
-from utils import TimeUtils  # Add this line
+import base64  # ADD THIS IMPORT
 # Import your modules
 from config import settings
 from database import get_db, init_db
@@ -44,6 +44,21 @@ def on_startup():
     print("✅ Database initialized")
     print(f"🔐 Using SECRET_KEY: {settings.SECRET_KEY[:20]}...")
     print(f"📁 Database: {settings.DATABASE_URL}")
+
+# Helper function for time calculations
+def _calculate_seconds_until(expiry_time):
+    """Calculate seconds until expiry (simple version)"""
+    if not expiry_time:
+        return 0
+    
+    try:
+        now = datetime.utcnow()
+        if now > expiry_time:
+            return 0
+        delta = expiry_time - now
+        return int(delta.total_seconds())
+    except:
+        return 0
 
 # Health check endpoint
 @app.get("/")
@@ -102,6 +117,8 @@ async def upload_content(
         expires_at = None
         if access_mode == "time_based" and duration_minutes:
             expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+            print(f"📅 Content expiry set to: {expires_at.isoformat()}")
+            print(f"⏰ That's {duration_minutes} minutes from now")
         
         # Create content record - ZERO-KNOWLEDGE (only stores key hash)
         content = Content(
@@ -213,17 +230,24 @@ async def access_content(
         # Check content status
         if content.status != "active":
             raise HTTPException(status_code=410, detail=f"Content is {content.status}")
+        
         # Handle one-time view
         if content.access_mode == "one_time" and content.views_count > 0:
             content.status = "viewed"
             db.commit()
             raise HTTPException(status_code=410, detail="Content already viewed (one-time view)")
         
-        # Check if expired
-        if content.expires_at and datetime.utcnow() > content.expires_at:
-            content.status = "expired"
-            db.commit()
-            raise HTTPException(status_code=410, detail="Content expired")
+        # Check if expired - FIXED: Use proper comparison
+        if content.expires_at:
+            now = datetime.utcnow()
+            if now > content.expires_at:
+                content.status = "expired"
+                db.commit()
+                raise HTTPException(status_code=410, detail="Content expired")
+            else:
+                # Debug log
+                time_left = content.expires_at - now
+                print(f"⏰ Content expires in: {int(time_left.total_seconds())} seconds")
         
         # ========== FIXED DEVICE LIMIT LOGIC ==========
         device_fingerprint = device_info.get("device_fingerprint", "")
@@ -270,7 +294,7 @@ async def access_content(
         if content.require_biometric and not device_info.get("biometric_verified", False):
             raise HTTPException(status_code=403, detail="Biometric verification required")
         
-              # Increment view count with null safety
+        # Increment view count with null safety
         content.views_count = (content.views_count or 0) + 1
         session.view_count = (session.view_count or 0) + 1
         
@@ -285,6 +309,42 @@ async def access_content(
         # Calculate views remaining
         views_remaining = max(0, content.max_devices - content.current_devices)
         
+        # For text content, read and return the encrypted text directly
+        # For other types, return streaming URL
+        encrypted_content_url = FileUtils.get_file_url(content.encrypted_data_url)
+        encrypted_text_content = ""
+        
+        if content.content_type == "text":
+            try:
+                # Read the encrypted text file (it's binary data, not text!)
+                file_path = content.encrypted_data_url
+                if file_path.startswith("/uploads/"):
+                    file_path = file_path[1:]  # Remove leading slash
+                
+                print(f"📄 Looking for text file at: {file_path}")
+                print(f"📄 File exists: {os.path.exists(file_path)}")
+                
+                if os.path.exists(file_path):
+                    # Read as binary and encode as base64 for safe JSON transmission
+                    with open(file_path, 'rb') as f:
+                        file_bytes = f.read()
+                    # Encode as base64 for safe transmission
+                    encrypted_text_content = base64.b64encode(file_bytes).decode('utf-8')
+                    print(f"✅ Read encrypted text: {len(file_bytes)} bytes, base64: {len(encrypted_text_content)} chars")
+                else:
+                    print(f"❌ Text file not found: {file_path}")
+                    # Try alternative path
+                    alt_path = f"uploads/{content.id}.dat"
+                    if os.path.exists(alt_path):
+                        with open(alt_path, 'rb') as f:
+                            file_bytes = f.read()
+                        encrypted_text_content = base64.b64encode(file_bytes).decode('utf-8')
+                        print(f"✅ Found at alternative path: {len(file_bytes)} bytes")
+            except Exception as e:
+                print(f"❌ Error reading text content: {e}")
+                import traceback
+                traceback.print_exc()
+        
         # Return metadata and encrypted file URL
         # Client will decrypt locally with their own key
         return {
@@ -297,13 +357,14 @@ async def access_content(
             "mime_type": content.mime_type,
             "access_mode": content.access_mode,
             "expiry_time": content.expires_at.isoformat() if content.expires_at else None,
-            "remaining_time_seconds": TimeUtils.seconds_until(content.expires_at) if content.expires_at else 0,
+            "remaining_time_seconds": _calculate_seconds_until(content.expires_at) if content.expires_at else 0,
             "views_remaining": views_remaining,
             "device_limit": content.max_devices,
             "current_devices": content.current_devices,
             "current_views": content.views_count,
-            # Return URL to encrypted file for streaming
-            "encrypted_content_url": FileUtils.get_file_url(content.encrypted_data_url),
+            # For text: return encrypted text, for others: return streaming URL
+            "encrypted_content": encrypted_text_content if content.content_type == "text" else "",
+            "encrypted_content_url": encrypted_content_url if content.content_type != "text" else "",
             "iv": content.iv,
             "security": {
                 "auto_terminate": content.auto_terminate,

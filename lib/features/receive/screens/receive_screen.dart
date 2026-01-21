@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:convert'; // For base64
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -1538,7 +1539,20 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         
         if (encryptedContent.isNotEmpty && !encryptedContent.startsWith('http')) {
           try {
-            _decryptedContent = EncryptionService.decryptData(encryptedContent, iv, key);
+            // Check if it's base64 encoded
+            String contentToDecrypt = encryptedContent;
+            
+            // Try to decode base64 first
+            try {
+              final decodedBytes = base64.decode(encryptedContent);
+              // Convert bytes to the format EncryptionService expects
+              contentToDecrypt = base64.encode(decodedBytes); // Re-encode as it was sent as base64
+              print('📄 Content is base64 encoded, decoded ${decodedBytes.length} bytes');
+            } catch (e) {
+              print('📄 Content is not base64, using as-is');
+            }
+            
+            _decryptedContent = EncryptionService.decryptData(contentToDecrypt, iv, key);
             print('✅ Text decrypted successfully, length: ${_decryptedContent.length} chars');
           } catch (e) {
             print('❌ Text decryption failed: $e');
