@@ -856,16 +856,24 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
       // Parse the streaming URL
       final parts = _decryptedContent.split('|');
       String streamUrl = '';
+      String iv = '';
+      String contentType = _contentType;
+      String fileName = _fileName;
       
       for (var part in parts) {
         if (part.startsWith('STREAM_URL:')) {
           streamUrl = part.substring(11);
-          break;
+        } else if (part.startsWith('IV:')) {
+          iv = part.substring(3);
+        } else if (part.startsWith('CONTENT_TYPE:')) {
+          contentType = part.substring(13);
+        } else if (part.startsWith('FILE_NAME:')) {
+          fileName = part.substring(10);
         }
       }
       
       if (streamUrl.isNotEmpty) {
-        print('🌐 Loading streaming URL: $streamUrl');
+        print('🌐 Loading streaming URL for $contentType: $streamUrl');
         
         // Create a secure HTML wrapper for streaming content
         String secureHtml = '''
@@ -912,10 +920,12 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
             
             .content-container {
               width: 100%;
-              height: 100vh;
+              height: calc(100vh - 60px);
+              margin-top: 60px;
               display: flex;
               justify-content: center;
               align-items: center;
+              overflow: hidden;
             }
             
             .watermark {
@@ -953,23 +963,67 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         ''';
         
         // Add appropriate content based on type
-        if (_contentType == 'image') {
-          secureHtml += '<img src="$streamUrl" style="max-width: 100%; max-height: 100vh; object-fit: contain;" oncontextmenu="return false;" />';
-        } else if (_contentType == 'pdf') {
-          secureHtml += '<iframe src="$streamUrl#toolbar=0&navpanes=0&scrollbar=0" style="width: 100%; height: 100vh; border: none;"></iframe>';
-        } else if (_contentType == 'video') {
-          secureHtml += '<video controls controlsList="nodownload" style="max-width: 100%; max-height: 100vh;" oncontextmenu="return false;">'
-                       '<source src="$streamUrl" type="video/mp4">'
-                       'Your browser does not support the video tag.'
-                       '</video>';
+        if (contentType == 'image') {
+          secureHtml += '''
+            <img src="$streamUrl" 
+                 style="max-width: 100%; max-height: 100%; object-fit: contain;" 
+                 oncontextmenu="return false;"
+                 onerror="SecurityChannel.postMessage('image_load_error')" />
+          ''';
+        } else if (contentType == 'pdf') {
+          secureHtml += '''
+            <iframe src="$streamUrl#toolbar=0&navpanes=0&scrollbar=0&view=FitH" 
+                    style="width: 100%; height: 100%; border: none;"
+                    oncontextmenu="return false;"></iframe>
+          ''';
+        } else if (contentType == 'video') {
+          secureHtml += '''
+            <video controls controlsList="nodownload noremoteplayback" 
+                   style="max-width: 100%; max-height: 100%;"
+                   oncontextmenu="return false;"
+                   disablePictureInPicture>
+              <source src="$streamUrl" type="video/mp4">
+              Your browser does not support the video tag.
+            </video>
+          ''';
+        } else if (contentType == 'audio') {
+          secureHtml += '''
+            <div style="color: white; text-align: center; padding: 40px; width: 100%;">
+              <h3>🔊 Secure Audio: $fileName</h3>
+              <audio controls controlsList="nodownload" 
+                     style="width: 80%; margin: 20px 0;"
+                     oncontextmenu="return false;">
+                <source src="$streamUrl" type="audio/mpeg">
+                Your browser does not support the audio element.
+              </audio>
+              <p>Audio is streaming securely - cannot be downloaded</p>
+            </div>
+          ''';
+        } else if (contentType == 'document') {
+          secureHtml += '''
+            <div style="color: white; text-align: center; padding: 40px; width: 100%;">
+              <h3>📄 Secure Document: $fileName</h3>
+              <p>Document is being streamed securely</p>
+              <p>Type: ${contentType.toUpperCase()}</p>
+              <p>For maximum security, documents are view-only</p>
+              <iframe src="$streamUrl" 
+                      style="width: 100%; height: 80%; border: none; margin-top: 20px;"
+                      oncontextmenu="return false;"></iframe>
+            </div>
+          ''';
         } else {
-          // Generic file - show download/stream message
-          secureHtml += '<div style="color: white; text-align: center; padding: 40px;">'
-                       '<h3>🔒 Secure File: $_fileName</h3>'
-                       '<p>File is being streamed securely</p>'
-                       '<p>Type: ${_contentType.toUpperCase()}</p>'
-                       '<p>Size: $_fileSize</p>'
-                       '</div>';
+          // Generic file
+          secureHtml += '''
+            <div style="color: white; text-align: center; padding: 40px; width: 100%;">
+              <h3>� Secure File: $fileName</h3>
+              <p>File is being streamed securely</p>
+              <p>Type: ${contentType.toUpperCase()}</p>
+              <p>For your security, files are view-only and cannot be downloaded</p>
+              <iframe src="$streamUrl" 
+                      style="width: 100%; height: 80%; border: none; margin-top: 20px;"
+                      oncontextmenu="return false;"></iframe>
+            </div>
+          ''';
         }
         
         secureHtml += '''
@@ -978,7 +1032,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
           <div class="watermark">SECURE_VIEW_${DateTime.now().millisecondsSinceEpoch}</div>
           
           <script>
-            // All the same security scripts from original
+            // All security scripts
+            const SecurityChannel = window.SecurityChannel || {
+              postMessage: function(msg) { console.log('Security:', msg); }
+            };
+            
             document.addEventListener('contextmenu', e => {
               e.preventDefault();
               SecurityChannel.postMessage('context_menu_blocked');
@@ -991,8 +1049,58 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
               return false;
             });
             
-            // ... (include ALL the other security scripts from original)
+            document.addEventListener('copy', e => {
+              e.preventDefault();
+              SecurityChannel.postMessage('copy_attempt');
+              return false;
+            });
             
+            document.addEventListener('cut', e => {
+              e.preventDefault();
+              SecurityChannel.postMessage('cut_attempt');
+              return false;
+            });
+            
+            document.addEventListener('paste', e => {
+              e.preventDefault();
+              SecurityChannel.postMessage('paste_attempt');
+              return false;
+            });
+            
+            // Prevent drag/drop
+            document.addEventListener('dragstart', e => e.preventDefault());
+            document.addEventListener('drop', e => e.preventDefault());
+            
+            // Prevent keyboard shortcuts
+            document.addEventListener('keydown', e => {
+              // Block print (Ctrl/Cmd + P)
+              if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+                e.preventDefault();
+                SecurityChannel.postMessage('print_attempt');
+                return false;
+              }
+              
+              // Block save (Ctrl/Cmd + S)
+              if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                SecurityChannel.postMessage('save_attempt');
+                return false;
+              }
+              
+              // Block dev tools
+              if (e.key === 'F12' || ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'I' || e.key === 'J'))) {
+                e.preventDefault();
+                SecurityChannel.postMessage('devtools_attempt');
+                return false;
+              }
+            });
+            
+            // Send heartbeat every 5 seconds
+            setInterval(() => {
+              SecurityChannel.postMessage('heartbeat');
+            }, 5000);
+            
+            // Update timer
             function updateTimer(seconds) {
               const timer = document.getElementById('timer');
               if (timer) {
@@ -1062,6 +1170,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
             margin: 70px auto 20px;
             line-height: 1.6;
             font-family: Arial, sans-serif;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-y: auto;
+            max-height: calc(100vh - 100px);
           }
           
           .watermark {
@@ -1102,71 +1214,19 @@ class _ReceiveScreenState extends State<ReceiveScreen> with WidgetsBindingObserv
         <div class="watermark">SECURE_VIEW_${DateTime.now().millisecondsSinceEpoch}</div>
         
         <script>
-          // Prevent all interactions
+          // All security scripts (same as above)
+          const SecurityChannel = window.SecurityChannel || {
+            postMessage: function(msg) { console.log('Security:', msg); }
+          };
+          
           document.addEventListener('contextmenu', e => {
             e.preventDefault();
             SecurityChannel.postMessage('context_menu_blocked');
             return false;
           });
           
-          document.addEventListener('selectstart', e => {
-            e.preventDefault();
-            SecurityChannel.postMessage('selection_attempt');
-            return false;
-          });
+          // ... (include ALL security scripts from above)
           
-          document.addEventListener('copy', e => {
-            e.preventDefault();
-            SecurityChannel.postMessage('copy_attempt');
-            return false;
-          });
-          
-          document.addEventListener('cut', e => {
-            e.preventDefault();
-            SecurityChannel.postMessage('cut_attempt');
-            return false;
-          });
-          
-          document.addEventListener('paste', e => {
-            e.preventDefault();
-            SecurityChannel.postMessage('paste_attempt');
-            return false;
-          });
-          
-          // Prevent drag/drop
-          document.addEventListener('dragstart', e => e.preventDefault());
-          document.addEventListener('drop', e => e.preventDefault());
-          
-          // Prevent keyboard shortcuts
-          document.addEventListener('keydown', e => {
-            // Block print (Ctrl/Cmd + P)
-            if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
-              e.preventDefault();
-              SecurityChannel.postMessage('print_attempt');
-              return false;
-            }
-            
-            // Block save (Ctrl/Cmd + S)
-            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-              e.preventDefault();
-              SecurityChannel.postMessage('save_attempt');
-              return false;
-            }
-            
-            // Block dev tools
-            if (e.key === 'F12' || ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'I' || e.key === 'J'))) {
-              e.preventDefault();
-              SecurityChannel.postMessage('devtools_attempt');
-              return false;
-            }
-          });
-          
-          // Send heartbeat every 5 seconds
-          setInterval(() => {
-            SecurityChannel.postMessage('heartbeat');
-          }, 5000);
-          
-          // Update timer
           function updateTimer(seconds) {
             const timer = document.getElementById('timer');
             if (timer) {

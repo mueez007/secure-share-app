@@ -8,13 +8,13 @@ import json
 from datetime import datetime, timedelta
 import os
 from pathlib import Path
-import base64  # ADD THIS IMPORT
+import base64
 # Import your modules
 from config import settings
 from database import get_db, init_db
 from models import Content, PIN, AccessSession
 from security import SecurityUtils
-from utils import FileUtils
+from utils import FileUtils, ContentUtils, TimeUtils  # ADD ContentUtils and TimeUtils
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -48,17 +48,7 @@ def on_startup():
 # Helper function for time calculations
 def _calculate_seconds_until(expiry_time):
     """Calculate seconds until expiry (simple version)"""
-    if not expiry_time:
-        return 0
-    
-    try:
-        now = datetime.utcnow()
-        if now > expiry_time:
-            return 0
-        delta = expiry_time - now
-        return int(delta.total_seconds())
-    except:
-        return 0
+    return TimeUtils.seconds_until(expiry_time)  # Use TimeUtils
 
 # Health check endpoint
 @app.get("/")
@@ -74,14 +64,14 @@ async def root():
         }
     }
 
-# ========== CONTENT UPLOAD ENDPOINT ==========
+# ========== CONTENT UPLOAD ENDPOINT ========== (FIXED)
 @app.post("/content/upload")
 async def upload_content(
     file: UploadFile = File(...),
     iv: str = Form(...),
     access_mode: str = Form(...),
     device_limit: int = Form(1),
-    content_type: str = Form("text"),
+    content_type: str = Form("text"),  # Client-specified type
     auto_terminate: bool = Form(True),
     require_biometric: bool = Form(False),
     dynamic_pin: bool = Form(False),
@@ -100,11 +90,15 @@ async def upload_content(
     Backend never sees the encryption key, only stores its hash.
     """
     try:
-        print(f"📤 Upload request: {file.filename}, Type: {content_type}, PIN: {pin}")
+        print(f"📤 Upload request: {file.filename}, Client type: {content_type}, PIN: {pin}")
         
         # Validate PIN (client provides 4-digit PIN)
         if not pin or len(pin) != 4 or not pin.isdigit():
             raise HTTPException(status_code=400, detail="PIN must be 4 digits")
+        
+        # Validate content type
+        if not ContentUtils.validate_content_type(content_type):
+            raise HTTPException(status_code=400, detail=f"Invalid content type: {content_type}")
         
         # Generate content ID
         content_id = str(uuid.uuid4())
@@ -120,16 +114,29 @@ async def upload_content(
             print(f"📅 Content expiry set to: {expires_at.isoformat()}")
             print(f"⏰ That's {duration_minutes} minutes from now")
         
+        # Get file metadata
+        actual_file_name = file_name or file.filename or "encrypted_file"
+        actual_file_size = file_size or 0
+        
+        # Get MIME type - prefer provided, fallback to detected
+        actual_mime_type = mime_type or file.content_type
+        if not actual_mime_type and file.filename:
+            actual_mime_type = ContentUtils.get_mime_type(file.filename)
+        
+        # If client says it's text but no MIME type, set it
+        if content_type == "text" and not actual_mime_type:
+            actual_mime_type = "text/plain"
+        
         # Create content record - ZERO-KNOWLEDGE (only stores key hash)
         content = Content(
             id=content_id,
             content_key_hash=key_hash,  # Only store hash, never the key
             iv=iv,
             encrypted_data_url=file_url,
-            content_type=content_type,
-            file_name=file_name or file.filename,
-            file_size=file_size or 0,
-            mime_type=mime_type or file.content_type,
+            content_type=content_type,  # Use client-specified type
+            file_name=actual_file_name,
+            file_size=actual_file_size,
+            mime_type=actual_mime_type,
             access_mode=access_mode,
             expires_at=expires_at,
             max_devices=device_limit,
@@ -138,7 +145,8 @@ async def upload_content(
             pin_rotation_minutes=pin_rotation_minutes if dynamic_pin else None,
             auto_terminate=auto_terminate,
             require_biometric=require_biometric,
-            status="active"
+            status="active",
+            views_count=0  # Explicitly initialize
         )
         
         # Hash the PIN (backend stores only hash for verification)
@@ -152,6 +160,7 @@ async def upload_content(
             pin_value=SecurityUtils.encrypt_key_for_storage(pin),  # Encrypted at rest
             is_active=True,
             expires_at=expires_at,
+            failed_attempts=0,  # Initialize
             rotation_schedule={
                 "interval_minutes": pin_rotation_minutes,
                 "next_rotation": (datetime.utcnow() + timedelta(minutes=pin_rotation_minutes)).isoformat() 
@@ -165,7 +174,7 @@ async def upload_content(
         db.commit()
         db.refresh(content)
         
-        print(f"✅ Content uploaded: {content_id}, Expires: {expires_at}")
+        print(f"✅ Content uploaded: {content_id}, Type: {content_type}, Expires: {expires_at}")
         print(f"📌 PIN stored in database for content: {content_id}")
         
         # Return success - backend NEVER returns encryption keys
@@ -187,7 +196,7 @@ async def upload_content(
         print(f"❌ Upload error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-# ========== CONTENT ACCESS ENDPOINT ========== (FIXED DEVICE LIMIT LOGIC)
+# ========== CONTENT ACCESS ENDPOINT ========== (FIXED)
 @app.post("/content/access/{pin}")
 async def access_content(
     pin: str,
@@ -237,7 +246,7 @@ async def access_content(
             db.commit()
             raise HTTPException(status_code=410, detail="Content already viewed (one-time view)")
         
-        # Check if expired - FIXED: Use proper comparison
+        # Check if expired
         if content.expires_at:
             now = datetime.utcnow()
             if now > content.expires_at:
@@ -247,9 +256,9 @@ async def access_content(
             else:
                 # Debug log
                 time_left = content.expires_at - now
-                print(f"⏰ Content expires in: {int(time_left.total_seconds())} seconds")
+                print(f"⏰ Content expires in: {TimeUtils.format_time_remaining(content.expires_at)}")
         
-        # ========== FIXED DEVICE LIMIT LOGIC ==========
+        # Device limit check
         device_fingerprint = device_info.get("device_fingerprint", "")
         
         # Check if this device already has access
@@ -304,60 +313,47 @@ async def access_content(
         
         db.commit()
         
-        print(f"✅ Access granted: {content.id}, Views: {content.views_count}, Devices: {content.current_devices}/{content.max_devices}")
+        print(f"✅ Access granted: {content.id}, Type: {content.content_type}, Views: {content.views_count}, Devices: {content.current_devices}/{content.max_devices}")
         
         # Calculate views remaining
         views_remaining = max(0, content.max_devices - content.current_devices)
         
-        # For text content, read and return the encrypted text directly
-        # For other types, return streaming URL
+        # Get streaming URL
         encrypted_content_url = FileUtils.get_file_url(content.encrypted_data_url)
         encrypted_text_content = ""
         
+        # Handle text content differently
         if content.content_type == "text":
             try:
-                # Read the encrypted text file (it's binary data, not text!)
                 file_path = content.encrypted_data_url
                 if file_path.startswith("/uploads/"):
                     file_path = file_path[1:]  # Remove leading slash
                 
                 print(f"📄 Looking for text file at: {file_path}")
-                print(f"📄 File exists: {os.path.exists(file_path)}")
                 
                 if os.path.exists(file_path):
-                    # Read as binary and encode as base64 for safe JSON transmission
                     with open(file_path, 'rb') as f:
                         file_bytes = f.read()
-                    # Encode as base64 for safe transmission
                     encrypted_text_content = base64.b64encode(file_bytes).decode('utf-8')
-                    print(f"✅ Read encrypted text: {len(file_bytes)} bytes, base64: {len(encrypted_text_content)} chars")
+                    print(f"✅ Read encrypted text: {len(file_bytes)} bytes")
                 else:
                     print(f"❌ Text file not found: {file_path}")
-                    # Try alternative path
-                    alt_path = f"uploads/{content.id}.dat"
-                    if os.path.exists(alt_path):
-                        with open(alt_path, 'rb') as f:
-                            file_bytes = f.read()
-                        encrypted_text_content = base64.b64encode(file_bytes).decode('utf-8')
-                        print(f"✅ Found at alternative path: {len(file_bytes)} bytes")
             except Exception as e:
                 print(f"❌ Error reading text content: {e}")
-                import traceback
-                traceback.print_exc()
         
-        # Return metadata and encrypted file URL
-        # Client will decrypt locally with their own key
+        # Return metadata
         return {
             "content_id": content.id,
             "access_granted": True,
             "session_token": session_token,
-            "content_type": content.content_type,
+            "content_type": content.content_type,  # image, pdf, video, audio, text, document
             "file_name": content.file_name,
             "file_size": content.file_size or 0,
             "mime_type": content.mime_type,
             "access_mode": content.access_mode,
             "expiry_time": content.expires_at.isoformat() if content.expires_at else None,
-            "remaining_time_seconds": _calculate_seconds_until(content.expires_at) if content.expires_at else 0,
+            "remaining_time_seconds": _calculate_seconds_until(content.expires_at),
+            "remaining_time_formatted": TimeUtils.format_time_remaining(content.expires_at),
             "views_remaining": views_remaining,
             "device_limit": content.max_devices,
             "current_devices": content.current_devices,
@@ -365,6 +361,7 @@ async def access_content(
             # For text: return encrypted text, for others: return streaming URL
             "encrypted_content": encrypted_text_content if content.content_type == "text" else "",
             "encrypted_content_url": encrypted_content_url if content.content_type != "text" else "",
+            "streaming_url": f"http://127.0.0.1:8000/content/stream/{content.id}?session_token={session_token}",
             "iv": content.iv,
             "security": {
                 "auto_terminate": content.auto_terminate,
@@ -377,11 +374,9 @@ async def access_content(
         raise he
     except Exception as e:
         print(f"❌ Access failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Access failed: {str(e)}")
 
-# ========== STREAM CONTENT ENDPOINT ==========
+# ========== STREAM CONTENT ENDPOINT ========== (FIXED)
 @app.get("/content/stream/{content_id}")
 async def stream_content(
     content_id: str,
@@ -404,11 +399,16 @@ async def stream_content(
         if not content:
             raise HTTPException(status_code=404, detail="Content not found")
         
+        # Check if content is still accessible
+        if content.status != "active":
+            raise HTTPException(status_code=410, detail=f"Content is {content.status}")
+        
         # Update session activity
         session.last_activity = datetime.utcnow()
+        session.view_count = (session.view_count or 0) + 1
         db.commit()
         
-        # Return encrypted file (client decrypts locally)
+        # Get file path
         file_path = content.encrypted_data_url
         if file_path.startswith("/uploads/"):
             file_path = file_path[1:]
@@ -416,20 +416,59 @@ async def stream_content(
         if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
         
-        print(f"📥 Streaming: {content_id} to session {session_token[:10]}...")
+        print(f"📥 Streaming: {content_id} ({content.content_type}) to session {session_token[:10]}...")
+        
+        # Determine media type
+        media_type = content.mime_type or "application/octet-stream"
         
         return FileResponse(
             file_path,
-            media_type=content.mime_type or "application/octet-stream",
+            media_type=media_type,
             headers={
                 "X-Content-Type-Options": "nosniff",
-                "Content-Disposition": f'inline; filename="{content.file_name}"'
+                "Content-Disposition": f'inline; filename="{content.file_name}"',
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0"
             }
         )
         
     except Exception as e:
         print(f"❌ Stream error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Stream failed: {str(e)}")
+
+# ========== CONTENT MANAGEMENT ENDPOINTS ==========
+@app.post("/content/{content_id}/terminate")
+async def terminate_content(
+    content_id: str,
+    db: Session = Depends(get_db),
+):
+    """Terminate content immediately"""
+    content = db.query(Content).filter(Content.id == content_id).first()
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    
+    content.status = "terminated"
+    
+    # Also deactivate PIN
+    pin = db.query(PIN).filter(PIN.content_id == content_id).first()
+    if pin:
+        pin.is_active = False
+    
+    db.commit()
+    
+    # Try to delete file
+    try:
+        file_path = content.encrypted_data_url
+        if file_path.startswith("/uploads/"):
+            file_path = file_path[1:]
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"🗑️ Deleted file: {file_path}")
+    except Exception as e:
+        print(f"⚠️ Could not delete file: {e}")
+    
+    return {"message": "Content terminated", "content_id": content_id}
 
 # ========== DEBUG ENDPOINTS ==========
 @app.get("/debug/content")
@@ -445,6 +484,8 @@ async def debug_content(db: Session = Depends(get_db)):
             {
                 "id": c.id[:8] + "...",
                 "type": c.content_type,
+                "mime": c.mime_type,
+                "filename": c.file_name,
                 "status": c.status,
                 "views": c.views_count or 0,
                 "devices": f"{c.current_devices or 0}/{c.max_devices}",
@@ -455,11 +496,29 @@ async def debug_content(db: Session = Depends(get_db)):
         "pins": [
             {
                 "content_id": p.content_id[:8] + "...",
-                "pin_hash": p.pin_hash[:20] + "..."
+                "active": p.is_active,
+                "attempts": p.failed_attempts
             }
             for p in pins
         ]
     }
+
+@app.get("/debug/files")
+async def debug_files():
+    """List all files in uploads directory"""
+    upload_dir = Path("uploads")
+    if not upload_dir.exists():
+        return {"files": [], "count": 0}
+    
+    files = []
+    for file_path in upload_dir.glob("*"):
+        files.append({
+            "name": file_path.name,
+            "size": file_path.stat().st_size,
+            "modified": datetime.fromtimestamp(file_path.stat().st_mtime).isoformat()
+        })
+    
+    return {"files": files, "count": len(files)}
 
 @app.get("/debug/db-check")
 async def debug_db_check():
